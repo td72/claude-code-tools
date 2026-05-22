@@ -1,0 +1,34 @@
+[tools]
+hadolint = "latest"
+
+[env]
+IMAGE = "td72/claude-code-mise"
+TAG = "latest"
+
+[tasks.lint]
+description = "Lint Dockerfile with hadolint"
+run = "hadolint Dockerfile"
+
+[tasks.build]
+description = "Build the sandbox image locally"
+run = "docker build -t $IMAGE:$TAG ."
+
+[tasks.push]
+description = "Build and push the image to the registry"
+run = "docker build -t $IMAGE:$TAG --push ."
+
+[tasks.shell]
+description = "Run the built image and open a bash shell for inspection"
+depends = ["build"]
+run = "docker run --rm -it $IMAGE:$TAG bash"
+
+[tasks.verify]
+description = "Verify mise is installed and activatable in the built image"
+depends = ["build"]
+run = '''
+docker run --rm $IMAGE:$TAG bash -lc 'mise --version && which mise'
+'''
+
+[tasks.ci]
+description = "Run lint and build (use in CI)"
+run = ["mise r lint", "mise r build"]
