@@ -24,6 +24,45 @@ ccwt_send_line() {
   printf '\r' | wezterm cli send-text --no-paste --pane-id "$pane"
 }
 
+ccwt_config_file() {
+  echo "${XDG_CONFIG_HOME:-$HOME/.config}/ccwt/config.toml"
+}
+
+# Emit one "<marketplace>/<plugin>" line per (marketplace, plugin)
+# pair listed in config.toml. Silently emits nothing if the config
+# file or yq/jq is missing.
+#
+# Expected schema:
+#   [[marketplaces]]
+#   name    = "kiconia-plugins"
+#   plugins = ["mise", "uv"]
+#
+#   [[marketplaces]]
+#   name    = "claude-plugins-official"
+#   plugins = ["github"]
+ccwt_read_plugins() {
+  local cfg
+  cfg=$(ccwt_config_file)
+  [[ -f $cfg ]] || return 0
+  command -v yq >/dev/null 2>&1 || return 0
+  command -v jq >/dev/null 2>&1 || return 0
+  yq -p toml -o json '.marketplaces // []' "$cfg" 2>/dev/null \
+    | jq -r '.[] | .name as $m | (.plugins // [])[] | "\($m)/\(.)"'
+}
+
+# Resolve <marketplace>/<name> to the latest version directory under
+# ~/.claude/plugins/cache/. Returns non-zero if not installed locally.
+ccwt_resolve_plugin_dir() {
+  local marketplace=$1 name=$2
+  local base="$HOME/.claude/plugins/cache/$marketplace/$name"
+  [[ -d $base ]] || return 1
+  local latest
+  # shellcheck disable=SC2012  # version dirs are semver/'unknown', ls is fine
+  latest=$(ls -1 "$base" 2>/dev/null | sort -V | tail -n1)
+  [[ -n $latest && -d "$base/$latest" ]] || return 1
+  echo "$base/$latest"
+}
+
 cmd_init() {
   local state pane
   state=$(ccwt_state_dir)
@@ -67,13 +106,30 @@ cmd_spawn() {
     --pane-id "$commander" --cwd "$worktree")
   echo "$pane" > "$(ccwt_pane_file "$branch")"
 
+  # Resolve host-installed plugins listed in ~/.config/ccwt/config.toml and
+  # bind-mount each one read-only at /plugins/<name> inside the worker.
+  local mount_args=() plugin_dir_args=""
+  local entry marketplace plugin_name host_dir
+  while IFS= read -r entry; do
+    [[ -z $entry || $entry == null/null ]] && continue
+    marketplace=${entry%%/*}
+    plugin_name=${entry#*/}
+    if ! host_dir=$(ccwt_resolve_plugin_dir "$marketplace" "$plugin_name"); then
+      echo "ccwt spawn: skipping plugin '$entry' (not installed locally)" >&2
+      continue
+    fi
+    mount_args+=(-v "$host_dir:/plugins/$plugin_name:ro")
+    plugin_dir_args+=" --plugin-dir /plugins/$plugin_name"
+  done < <(ccwt_read_plugins)
+
   docker run -d --name "$name" \
     -v "$worktree:/workspace" \
+    ${mount_args[@]+"${mount_args[@]}"} \
     -w /workspace \
     "${CCWT_IMAGE:-tedsum/claude-code-mise:latest}" \
     sleep infinity >/dev/null
 
-  ccwt_send_line "$pane" "docker exec -it $name claude"
+  ccwt_send_line "$pane" "docker exec -it $name claude${plugin_dir_args}"
 
   if [[ -n $task ]]; then
     # Wait for the REPL to be ready; an initial task sent too early is lost.
@@ -140,7 +196,14 @@ Commands:
   help                       Show this help.
 
 Env:
-  CCWT_IMAGE  Override docker image (default: tedsum/claude-code-mise:latest)
+  CCWT_IMAGE        Override docker image (default: tedsum/claude-code-mise:latest)
+  CCWT_SPAWN_WAIT   Seconds to wait before sending the initial task (default: 5)
+  XDG_CONFIG_HOME   Used to locate config.toml (default: ~/.config)
+
+Config:
+  ~/.config/ccwt/config.toml — list of [[plugin]] entries (marketplace/name)
+  whose host-installed copy is bind-mounted into the worker and passed via
+  `claude --plugin-dir` so the worker sees the same plugins as the host.
 
 See docs/worktree-workflow.md for design.
 EOF

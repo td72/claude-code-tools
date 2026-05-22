@@ -169,6 +169,38 @@ printf '\r' | wezterm cli send-text --pane-id "$PANE_ID" --no-paste
 wezterm cli get-text --pane-id "$PANE_ID" --start-line -200
 ```
 
+## worker への plugin 引き継ぎ
+
+ホスト Claude にインストール済みの plugin を worker でも使うため、`ccwt spawn` は `~/.config/ccwt/config.toml` を読んで bind-mount + `--plugin-dir` を組み立てます。
+
+### 設定ファイル
+
+`~/.config/ccwt/config.toml`:
+
+```toml
+[[marketplaces]]
+name    = "kiconia-plugins"
+plugins = ["mise", "uv"]
+
+[[marketplaces]]
+name    = "claude-plugins-official"
+plugins = ["github"]
+```
+
+### 解決ルール
+
+各 (marketplace, plugin) ペアについて:
+
+1. `~/.claude/plugins/cache/<marketplace>/<name>/` 配下を `ls | sort -V | tail -1` で最新ディレクトリ (semver / `unknown`) に解決
+2. `docker run` に `-v <host_dir>:/plugins/<name>:ro` を追加
+3. `docker exec ... claude` に `--plugin-dir /plugins/<name>` を追加
+
+config 不在、`yq`/`jq` 不在、plugin 未インストール — いずれも spawn は abort せず、その plugin だけスキップしてプレーンな worker を起動。
+
+### 認証情報は引き継がない
+
+`~/.claude/` 全体ではなく、`~/.claude/plugins/cache/<m>/<n>/<v>/` の個別ディレクトリのみマウントするので、`history.jsonl`・`sessions/`・`.credentials.json` などは worker に渡りません。worker 側 claude の認証は別経路 (ベースイメージ内の claude が持つ認証や、別途渡す API キー) に依存します。
+
 ## Docker サンドボックスの要件
 
 現状の `tedsum/claude-code-mise` に対する確認・追加事項:

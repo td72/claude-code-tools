@@ -16,7 +16,7 @@ Claude Code の **司令塔 / worker** 並列開発を支援する小道具集�
 | `gwq` | worktree 管理 (`~/worktrees/...` 配下) |
 | `mise` | tool chain (gwq, shellcheck, hadolint をこの repo で固定) |
 
-`mise install` で gwq / shellcheck / hadolint が揃います。wezterm と docker はホストに別途。
+`mise install` で gwq / shellcheck / hadolint / yq / jq が揃います。wezterm と docker はホストに別途。
 
 ## 使い方 — Bash CLI として
 
@@ -68,6 +68,29 @@ claude --plugin-dir /path/to/claude-code-tools
 ```
 
 `disable-model-invocation: true` を付けてあるので、明示的に `/ccwt:*` と叩いたときだけ動きます (司令塔 Claude が勝手に spawn することはありません)。
+
+## worker への plugin 引き継ぎ
+
+ホストの Claude にインストール済みの plugin (たとえば `kiconia-plugins/mise` や `claude-plugins-official/github`) を worker にも引き継ぎたい場合、`~/.config/ccwt/config.toml` に列挙しておくと `ccwt spawn` 時に自動で読み取って:
+
+1. `~/.claude/plugins/cache/<marketplace>/<name>/<latest>/` を `/plugins/<name>` に read-only で bind-mount
+2. worker 内の `claude` を `--plugin-dir /plugins/<name>` 付きで起動
+
+します。
+
+設定ファイルの最小例は [`examples/config.toml`](examples/config.toml) を参照。書式:
+
+```toml
+[[marketplaces]]
+name    = "kiconia-plugins"
+plugins = ["mise", "uv"]
+
+[[marketplaces]]
+name    = "claude-plugins-official"
+plugins = ["github"]
+```
+
+config が無い、`yq`/`jq` が無い、もしくはローカルに該当 plugin が未インストール — どのケースでも `ccwt spawn` は abort せず、その plugin だけスキップして素の worker を起動します。
 
 ## 開発
 

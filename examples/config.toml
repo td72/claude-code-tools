@@ -1,0 +1,14 @@
+# Copy this file to ~/.config/ccwt/config.toml to enable plugin passthrough.
+#
+# Each [[marketplaces]] entry lists plugins that ccwt will bind-mount from
+# ~/.claude/plugins/cache/<name>/<plugin>/<latest>/ into the worker container
+# and pass to `claude --plugin-dir`. Plugins not installed locally are skipped
+# with a warning rather than aborting the spawn.
+
+[[marketplaces]]
+name    = "kiconia-plugins"
+plugins = ["mise", "uv"]
+
+[[marketplaces]]
+name    = "claude-plugins-official"
+plugins = ["github"]
