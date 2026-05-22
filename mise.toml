@@ -1,13 +1,19 @@
 [tools]
 hadolint = "latest"
+shellcheck = "latest"
+"github:d-kuro/gwq" = "latest"
 
 [env]
 IMAGE = "tedsum/claude-code-mise"
 TAG = "latest"
+_.path = ["./bin"]
 
 [tasks.lint]
-description = "Lint Dockerfile with hadolint"
-run = "hadolint Dockerfile"
+description = "Lint Dockerfile (hadolint) and bin/ccwt (shellcheck)"
+run = [
+  "hadolint Dockerfile",
+  "shellcheck bin/ccwt",
+]
 
 [tasks.build]
 description = "Build the sandbox image locally"

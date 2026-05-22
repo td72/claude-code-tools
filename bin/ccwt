@@ -1,0 +1,151 @@
+#!/usr/bin/env bash
+# ccwt - Claude Code WorkTree manager
+# See docs/worktree-workflow.md for design.
+set -euo pipefail
+
+ccwt_state_dir() {
+  local repo
+  repo=$(basename "$(git rev-parse --show-toplevel)")
+  echo "${XDG_STATE_HOME:-$HOME/.local/state}/ccwt/${repo}"
+}
+
+ccwt_commander_file() { echo "$(ccwt_state_dir)/commander"; }
+ccwt_pane_file() { echo "$(ccwt_state_dir)/panes/$1"; }
+
+ccwt_sanitize() {
+  # branch -> safe identifier (docker name + filename)
+  printf '%s' "$1" | tr '/' '_'
+}
+
+ccwt_send_line() {
+  local pane=$1 text=$2
+  wezterm cli send-text --no-paste --pane-id "$pane" "$text"
+  printf '\r' | wezterm cli send-text --no-paste --pane-id "$pane"
+}
+
+cmd_init() {
+  local state pane
+  state=$(ccwt_state_dir)
+  mkdir -p "$state/panes"
+  pane=${WEZTERM_PANE:-}
+  if [[ -z $pane ]]; then
+    echo "ccwt init: WEZTERM_PANE is not set. Run inside a WezTerm pane." >&2
+    exit 1
+  fi
+  echo "$pane" > "$(ccwt_commander_file)"
+  echo "ccwt: commander pane = $pane"
+  echo "ccwt: state dir      = $state"
+}
+
+cmd_spawn() {
+  local branch=${1:?usage: ccwt spawn <branch> [initial-task]}
+  local task=${2:-}
+  local commander pane worktree name commander_file
+  commander_file=$(ccwt_commander_file)
+  if [[ ! -f $commander_file ]]; then
+    echo "ccwt spawn: run 'ccwt init' first." >&2
+    exit 1
+  fi
+  commander=$(cat "$commander_file")
+  name="ccwt-$(ccwt_sanitize "$branch")"
+
+  gwq add "$branch"
+  worktree=$(gwq get "$branch")
+
+  pane=$(wezterm cli split-pane --bottom --percent 30 \
+    --pane-id "$commander" --cwd "$worktree")
+  echo "$pane" > "$(ccwt_pane_file "$branch")"
+
+  docker run -d --name "$name" \
+    -v "$worktree:/workspace" \
+    -w /workspace \
+    "${CCWT_IMAGE:-tedsum/claude-code-mise:latest}" \
+    sleep infinity >/dev/null
+
+  ccwt_send_line "$pane" "docker exec -it $name claude"
+
+  if [[ -n $task ]]; then
+    sleep 1
+    ccwt_send_line "$pane" "$task"
+  fi
+
+  echo "ccwt: spawned worker '$branch'"
+  echo "  pane-id   = $pane"
+  echo "  worktree  = $worktree"
+  echo "  container = $name"
+}
+
+cmd_tell() {
+  local branch=${1:?usage: ccwt tell <branch> <message>}
+  shift
+  local message="$*"
+  local pane_file pane
+  pane_file=$(ccwt_pane_file "$branch")
+  if [[ ! -f $pane_file ]]; then
+    echo "ccwt tell: no worker named '$branch'." >&2
+    exit 1
+  fi
+  pane=$(cat "$pane_file")
+  ccwt_send_line "$pane" "$message"
+}
+
+cmd_list() {
+  echo "# active worker containers"
+  docker ps --filter 'name=^ccwt-' --format 'table {{.Names}}\t{{.Status}}\t{{.Image}}' || true
+  echo
+  echo "# gwq worktrees"
+  gwq list || true
+}
+
+cmd_cleanup() {
+  local branch=${1:?usage: ccwt cleanup <branch>}
+  local name pane pane_file
+  name="ccwt-$(ccwt_sanitize "$branch")"
+  pane_file=$(ccwt_pane_file "$branch")
+
+  docker rm -f "$name" 2>/dev/null || true
+
+  if [[ -f $pane_file ]]; then
+    pane=$(cat "$pane_file")
+    wezterm cli kill-pane --pane-id "$pane" 2>/dev/null || true
+    rm -f "$pane_file"
+  fi
+
+  echo "ccwt: stopped container '$name' and killed pane."
+  echo "ccwt: run 'gwq remove $branch' to drop the worktree (not done automatically)."
+}
+
+cmd_help() {
+  cat <<'EOF'
+Usage: ccwt <command> [args...]
+
+Commands:
+  init                       Register the current WezTerm pane as commander.
+  spawn <branch> [<task>]    Create a worktree, split a pane, start a worker.
+  tell <branch> <message>    Send a message to a worker's REPL.
+  list                       List active workers and worktrees.
+  cleanup <branch>           Stop container and kill pane (worktree kept).
+  help                       Show this help.
+
+Env:
+  CCWT_IMAGE  Override docker image (default: tedsum/claude-code-mise:latest)
+
+See docs/worktree-workflow.md for design.
+EOF
+}
+
+main() {
+  local cmd=${1:-help}
+  shift || true
+  case "$cmd" in
+    init)    cmd_init "$@" ;;
+    spawn)   cmd_spawn "$@" ;;
+    tell)    cmd_tell "$@" ;;
+    list)    cmd_list "$@" ;;
+    cleanup) cmd_cleanup "$@" ;;
+    help|-h|--help) cmd_help ;;
+    *) echo "ccwt: unknown command '$cmd'" >&2; cmd_help; exit 2 ;;
+  esac
+}
+
+main "$@"
