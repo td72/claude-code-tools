@@ -2,7 +2,7 @@
 hadolint = "latest"
 
 [env]
-IMAGE = "td72/claude-code-mise"
+IMAGE = "tedsum/claude-code-mise"
 TAG = "latest"
 
 [tasks.lint]
