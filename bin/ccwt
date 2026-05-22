@@ -10,11 +10,12 @@ ccwt_state_dir() {
 }
 
 ccwt_commander_file() { echo "$(ccwt_state_dir)/commander"; }
-ccwt_pane_file() { echo "$(ccwt_state_dir)/panes/$1"; }
+ccwt_pane_file() { echo "$(ccwt_state_dir)/panes/$(ccwt_sanitize "$1")"; }
 
 ccwt_sanitize() {
-  # branch -> safe identifier (docker name + filename)
-  printf '%s' "$1" | tr '/' '_'
+  # branch -> safe identifier (docker name + filename).
+  # Match gwq's path convention which replaces '/' with '-'.
+  printf '%s' "$1" | tr '/' '-'
 }
 
 ccwt_send_line() {
@@ -49,8 +50,18 @@ cmd_spawn() {
   commander=$(cat "$commander_file")
   name="ccwt-$(ccwt_sanitize "$branch")"
 
-  gwq add "$branch"
+  if git rev-parse --verify --quiet "refs/heads/$branch" >/dev/null 2>&1; then
+    gwq add "$branch"
+  else
+    gwq add -b "$branch"
+  fi
   worktree=$(gwq get "$branch")
+
+  # host-side mise loads the worktree's mise.toml when the new pane's cwd
+  # is set there; pre-trust it to avoid prompt noise on every command.
+  if [[ -f "$worktree/mise.toml" ]] && command -v mise >/dev/null 2>&1; then
+    mise trust --quiet "$worktree/mise.toml" >/dev/null 2>&1 || true
+  fi
 
   pane=$(wezterm cli split-pane --bottom --percent 30 \
     --pane-id "$commander" --cwd "$worktree")
@@ -65,7 +76,8 @@ cmd_spawn() {
   ccwt_send_line "$pane" "docker exec -it $name claude"
 
   if [[ -n $task ]]; then
-    sleep 1
+    # Wait for the REPL to be ready; an initial task sent too early is lost.
+    sleep "${CCWT_SPAWN_WAIT:-5}"
     ccwt_send_line "$pane" "$task"
   fi
 
