@@ -1,0 +1,14 @@
+{
+  "name": "td72",
+  "description": "td72 marketplace — Claude Code plugins from github.com/td72.",
+  "owner": {
+    "name": "Kohei Hosokawa"
+  },
+  "plugins": [
+    {
+      "name": "ccwt",
+      "source": "./",
+      "description": "Spawn worker Claudes in Docker sandboxes on dedicated git worktrees, observable through WezTerm panes."
+    }
+  ]
+}

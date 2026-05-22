@@ -46,21 +46,25 @@ mise exec -- gwq remove feature/foo   # 不要なら worktree も削除
 
 ## 使い方 — Claude Code plugin として
 
-司令塔 Claude に slash command (`/ccwt:spawn` 等) として読み込ませる場合:
-
-```bash
-# ローカルディレクトリを plugin として読み込む
-claude --plugin-dir /path/to/claude-code-tools
-```
-
-セッション内で:
+司令塔 Claude に slash command (`/ccwt:spawn` 等) として読み込ませる場合、marketplace 経由で永続インストールします:
 
 ```text
+# 一度だけ
+/plugin marketplace add td72/claude-code-tools
+/plugin install ccwt@td72
+
+# 以降のセッションでは自動でロードされる
 /ccwt:init
 /ccwt:spawn feature/foo "<task>"
 /ccwt:tell  feature/foo "<message>"
 /ccwt:list
 /ccwt:cleanup feature/foo
+```
+
+開発中にローカルディレクトリを直接読みたい場合は:
+
+```bash
+claude --plugin-dir /path/to/claude-code-tools
 ```
 
 `disable-model-invocation: true` を付けてあるので、明示的に `/ccwt:*` と叩いたときだけ動きます (司令塔 Claude が勝手に spawn することはありません)。
