@@ -43,21 +43,22 @@ wt_worker_origin_path() {
   echo "$url"
 }
 
-# Mint a scoped GitHub App installation token and store it as the sandbox's
-# per-sandbox `github` secret. Best-effort: any failure just emits a warning
-# and leaves the sandbox without GitHub auth (worker can still read public
-# repos but cannot push). Requires uv + op CLI; see wt-worker-gh-token.
+# Mint a scoped GitHub App installation token via the external
+# `agent-gh-repo-token` CLI (https://github.com/td72/agent-gh-repo-token) and
+# store it as the sandbox's per-sandbox `github` secret. Best-effort: any
+# failure just emits a warning and leaves the sandbox without GitHub auth
+# (worker can still read public repos but cannot push). If the CLI is not
+# installed, wt-worker silently falls back to the global `github` secret
+# (if any).
 wt_worker_inject_github_secret() {
   local sandbox=$1 origin=$2
-  local script_dir token_bin err_file token
-  script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-  token_bin="$script_dir/wt-worker-gh-token"
-  if [[ ! -x $token_bin ]]; then
-    echo "wt-worker spawn: $token_bin not found, skipping github auth" >&2
+  local err_file token
+  if ! command -v agent-gh-repo-token >/dev/null 2>&1; then
+    # No-op: fall back to whatever global `github` secret the user set.
     return 0
   fi
-  err_file=$(mktemp -t wt-worker-gh-token.XXXXXX)
-  if token=$("$token_bin" --origin "$origin" 2>"$err_file"); then
+  err_file=$(mktemp -t agent-gh-repo-token.XXXXXX)
+  if token=$(agent-gh-repo-token --origin "$origin" 2>"$err_file"); then
     rm -f "$err_file"
     if [[ -n $token ]]; then
       printf '%s' "$token" | sbx secret set "$sandbox" github >/dev/null
@@ -249,16 +250,18 @@ Env:
   XDG_CONFIG_HOME       Used to locate config.toml (default: ~/.config)
 
 Auth:
-  Anthropic: sbx secret set anthropic                    (global, once)
-  GitHub (simple):  sbx secret set -g github             (global PAT fallback)
-  GitHub (scoped):  ~/.config/wt-worker/repos.toml       (GitHub App + 1Password)
-    - spawn mints a per-sandbox token scoped to the current repo + configured
-      permissions; expires in 1 hour. See examples/repos.toml.
+  Anthropic:        sbx secret set -g anthropic         (global, once)
+  GitHub (simple):  sbx secret set -g github            (global PAT fallback)
+  GitHub (scoped):  install agent-gh-repo-token, then
+                    ~/.config/agent-gh-repo-token/repos.toml
+    - if agent-gh-repo-token is on PATH and has a matching entry, spawn mints
+      a per-sandbox token scoped to the current repo + configured permissions
+      (expires in 1 hour) and stores it as the sandbox's `github` secret.
+    - see https://github.com/td72/agent-gh-repo-token
 
 Config:
   ~/.config/wt-worker/config.toml — [[marketplaces]] whose plugins are passed
   to the worker as extra read-only workspaces and --plugin-dir args.
-  ~/.config/wt-worker/repos.toml  — GitHub App per-org/repo policy (see above).
 
 Worktrees are created under .sbx/ in the repository root.
 Add .sbx/ to .gitignore to keep git status clean.

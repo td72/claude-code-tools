@@ -24,10 +24,9 @@ Claude Code の **司令塔 / worker** 並列開発を支援するプラグイ�
 | `wezterm` (cli) | pane の split / send-text / get-text | 必須 |
 | `sbx` | Docker Sandboxes CLI (認証・サンドボックス管理・worktree 作成) | 必須 |
 | `mise` | ツールチェイン (shellcheck / hadolint / jq / yq をこの repo で固定) | 必須 |
-| `uv` | `wt-worker-gh-token` の inline-deps 解決 | GitHub App 機能を使う場合 |
-| `op` (1Password CLI) | App private key / installation_id 等の引き出し | GitHub App 機能を使う場合 |
+| [`agent-gh-repo-token`](https://github.com/td72/agent-gh-repo-token) | per-repo の scoped GitHub token を mint | GitHub App 認証を使う場合 |
 
-`mise install` で shellcheck / hadolint / jq / yq が揃います。wezterm / sbx / uv / op はホストに別途。
+`mise install` で shellcheck / hadolint / jq / yq が揃います。wezterm / sbx はホストに別途。
 
 ### 初回セットアップ
 
@@ -46,27 +45,19 @@ sbx secret set -g github
 #   必要スコープ: contents:write + pull_requests:write (対象リポジトリのみ)
 ```
 
-**(B) 推奨: GitHub App + 1Password で per-repo の最小権限 token を毎回発行** —
-worker ごとに「その repo だけ・必要な permission だけ・1時間で失効」の token を mint:
+**(B) 推奨: per-repo の最小権限 token を毎回発行** —
+[`agent-gh-repo-token`](https://github.com/td72/agent-gh-repo-token) をホストに入れ、
+GitHub App + 1Password で「その repo だけ・必要な permission だけ・1時間で失効」の token を mint:
 
 ```bash
-# 1. GitHub App を作成 (https://github.com/settings/apps/new)
-#    Permissions: Contents=Write, Pull requests=Write
-#    Webhook: 無効化
-#    Where can this GitHub App be installed?: Only on this account
-# 2. App の private key (.pem) を生成・ダウンロード
-# 3. 対象 repo に install
-# 4. 1Password に item を作って下記フィールドを保存:
-#      app_id           = <App ID>
-#      installation_id  = <Installation ID>
-#      private_key      = <PEM 全体>
-# 5. ~/.config/wt-worker/repos.toml を書く
-cp wt-worker/examples/repos.toml ~/.config/wt-worker/repos.toml
-$EDITOR ~/.config/wt-worker/repos.toml
+uv tool install git+https://github.com/td72/agent-gh-repo-token
+# セットアップ手順 (App 作成 → install → 1Password に保存 → repos.toml を書く)
+# は agent-gh-repo-token の README を参照
 ```
 
-`wt-worker spawn` が呼ばれたとき、(B) があれば sandbox 固有 secret として
-scoped token が自動 inject されます。なければ (A) の global secret が fallback。
+`wt-worker spawn` が呼ばれたとき、`agent-gh-repo-token` が PATH にあり repos.toml に
+該当 entry があれば、sandbox 固有 secret として scoped token が自動 inject されます。
+なければ (A) の global secret が fallback。
 
 認証はすべて sbx プロキシが透過処理するため、コンテナ内に token が露出しません。
 
@@ -152,29 +143,14 @@ config 不在 / `yq`/`jq` 不在 / plugin 未インストール — いずれも
 
 ### per-repo GitHub App token (上記初回セットアップ B の詳細)
 
-`~/.config/wt-worker/repos.toml` に org/repo → 1Password item のマッピングを書きます:
+GitHub App 作成・1Password へのキー保管・`repos.toml` の書き方は
+[agent-gh-repo-token の README](https://github.com/td72/agent-gh-repo-token)
+を参照してください。
 
-```toml
-["github.com/td72"]
-op_item     = "op://Personal/td72-wt-worker"
-permissions = { contents = "write", pull_requests = "write" }
-
-# 例外だけ書く (org 設定が deep merge のベース)
-["github.com/td72/secret-stuff"]
-permissions = { contents = "read", pull_requests = "write" }
-```
-
-resolve 規則:
-
-1. `["github.com/<owner>/<repo>"]` があればその値
-2. なければ `["github.com/<owner>"]` の値
-3. repo は org を per-key で上書き (shallow merge)
-4. どちらも無ければ skip (warning, spawn は続行)
-
-token は API 呼び出し時に `repositories=[<現在の repo>]` + `permissions=<上記>` で
-絞られるため、install が複数 repo に効いていても worker は**この repo だけ**触れます。
-
-設定ファイルの雛形: [`wt-worker/examples/repos.toml`](./wt-worker/examples/repos.toml)
+wt-worker 側の挙動: spawn 時に `git remote get-url origin` から `host/owner/repo` を
+導出し、`agent-gh-repo-token --origin <それ>` を呼びます。stdout に token が返れば
+`sbx secret set <sandbox名> github` で sandbox 固有 secret として注入、失敗・skip した
+場合はグローバル secret 任せで spawn を続行します。
 
 ### 開発 (mise tasks)
 

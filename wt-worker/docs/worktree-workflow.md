@@ -202,23 +202,24 @@ sbx secret set -g github   # fine-grained PAT を入力 (全 sandbox 共通)
 
 ### GitHub (推奨: per-repo 最小権限)
 
-`~/.config/wt-worker/repos.toml` に org/repo → 1Password item をマップしておくと、
-`wt-worker spawn` が:
+[`agent-gh-repo-token`](https://github.com/td72/agent-gh-repo-token) をホストに入れて
+おくと、`wt-worker spawn` は:
 
 1. `git remote get-url origin` から `<host>/<owner>/<repo>` を導出
-2. config を `["<host>/<owner>/<repo>"] > ["<host>/<owner>"]` でマージして resolve
-3. `op item get` で App ID / installation_id / private key を取得
-4. JWT 生成 → `POST /app/installations/{id}/access_tokens` で installation token を mint
-5. `repositories=[<現在のrepo>]` + 設定 permissions で**scope を絞った**token を取得
-6. `sbx secret set <sandbox名> github` で sandbox 固有 secret として注入
+2. `agent-gh-repo-token --origin <それ>` を呼び出し
+3. 成功すれば stdout の token を `sbx secret set <sandbox名> github` に流す
+4. 失敗・未インストールはグローバル `-g github` の secret に fallback
 
-結果として worker は「**この repo の・必要な permission だけ・1時間で失効する**」token しか
-持たないため、漏洩リスクが極小化されます。グローバル `-g github` の secret があれば
-それが fallback、なければ worker は GitHub 認証なしで起動します (`git clone` 等は public 範囲のみ)。
+`agent-gh-repo-token` 自体は GitHub App + 1Password に基づき
+「**現在の repo の・指定 permission だけ・1時間で失効する**」installation token を
+mint します。詳細 (App 作成手順・`repos.toml` の書き方・解決規則) は同ツールの
+README を参照。
 
-実装は `bin/wt-worker-gh-token` (Python via uv inline-deps)。前提ツール: `uv` + `op` CLI。
+インストール:
 
-設定例: [`examples/repos.toml`](../examples/repos.toml)
+```bash
+uv tool install git+https://github.com/td72/agent-gh-repo-token
+```
 
 ## オープン課題
 
