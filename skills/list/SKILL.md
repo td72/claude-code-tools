@@ -1,5 +1,5 @@
 ---
-description: List active ccwt worker containers and gwq-managed worktrees.
+description: List active ccwt worker sandboxes.
 disable-model-invocation: true
 ---
 
@@ -11,4 +11,4 @@ Run:
 ccwt list
 ```
 
-Show the output to the user verbatim. The first block lists running containers, the second lists all worktrees including the main checkout.
+Show the output to the user verbatim.

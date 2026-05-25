@@ -145,6 +145,26 @@ cmd_tell() {
   ccwt_send_line "$pane" "$message"
 }
 
+cmd_logs() {
+  local branch=${1:?usage: ccwt logs <branch> [-n <lines>]}
+  local lines=200
+  shift
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -n) lines=${2:?-n requires a number}; shift 2 ;;
+      *) echo "ccwt logs: unknown option '$1'" >&2; exit 1 ;;
+    esac
+  done
+  local pane_file pane
+  pane_file=$(ccwt_pane_file "$branch")
+  if [[ ! -f $pane_file ]]; then
+    echo "ccwt logs: no worker named '$branch'." >&2
+    exit 1
+  fi
+  pane=$(cat "$pane_file")
+  wezterm cli get-text --pane-id "$pane" --start-line "-$lines"
+}
+
 cmd_list() {
   sbx ls || true
 }
@@ -183,6 +203,7 @@ Commands:
   init                       Register the current WezTerm pane as commander.
   spawn <branch> [<task>]    Create a worktree + sandbox, start a worker.
   tell <branch> <message>    Send a message to a worker's REPL.
+  logs <branch> [-n <lines>] Read the worker pane output (default: 200 lines).
   list                       List active sandboxes (sbx ls).
   cleanup <branch>           Remove sandbox and kill pane.
   help                       Show this help.
@@ -213,6 +234,7 @@ main() {
     init)    cmd_init "$@" ;;
     spawn)   cmd_spawn "$@" ;;
     tell)    cmd_tell "$@" ;;
+    logs)    cmd_logs "$@" ;;
     list)    cmd_list "$@" ;;
     cleanup) cmd_cleanup "$@" ;;
     help|-h|--help) cmd_help ;;
