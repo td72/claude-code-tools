@@ -13,8 +13,7 @@ ccwt_commander_file() { echo "$(ccwt_state_dir)/commander"; }
 ccwt_pane_file() { echo "$(ccwt_state_dir)/panes/$(ccwt_sanitize "$1")"; }
 
 ccwt_sanitize() {
-  # branch -> safe identifier (docker name + filename).
-  # Match gwq's path convention which replaces '/' with '-'.
+  # branch -> safe identifier for sbx name + filename (sbx allows letters, numbers, hyphens, periods, +, -)
   printf '%s' "$1" | tr '/' '-'
 }
 
@@ -28,18 +27,8 @@ ccwt_config_file() {
   echo "${XDG_CONFIG_HOME:-$HOME/.config}/ccwt/config.toml"
 }
 
-# Emit one "<marketplace>/<plugin>" line per (marketplace, plugin)
-# pair listed in config.toml. Silently emits nothing if the config
-# file or yq/jq is missing.
-#
-# Expected schema:
-#   [[marketplaces]]
-#   name    = "kiconia-plugins"
-#   plugins = ["mise", "uv"]
-#
-#   [[marketplaces]]
-#   name    = "claude-plugins-official"
-#   plugins = ["github"]
+# Emit one "<marketplace>/<plugin>" line per entry in config.toml.
+# Silently emits nothing if the config file or yq/jq is missing.
 ccwt_read_plugins() {
   local cfg
   cfg=$(ccwt_config_file)
@@ -89,6 +78,7 @@ cmd_spawn() {
   commander=$(cat "$commander_file")
   name="ccwt-$(ccwt_sanitize "$branch")"
 
+  # Create worktree via gwq
   if git rev-parse --verify --quiet "refs/heads/$branch" >/dev/null 2>&1; then
     gwq add "$branch"
   else
@@ -96,19 +86,15 @@ cmd_spawn() {
   fi
   worktree=$(gwq get "$branch")
 
-  # host-side mise loads the worktree's mise.toml when the new pane's cwd
-  # is set there; pre-trust it to avoid prompt noise on every command.
+  # Pre-trust the worktree's mise.toml to avoid noise in the pane
   if [[ -f "$worktree/mise.toml" ]] && command -v mise >/dev/null 2>&1; then
     mise trust --quiet "$worktree/mise.toml" >/dev/null 2>&1 || true
   fi
 
-  pane=$(wezterm cli split-pane --bottom --percent 30 \
-    --pane-id "$commander" --cwd "$worktree")
-  echo "$pane" > "$(ccwt_pane_file "$branch")"
-
-  # Resolve host-installed plugins listed in ~/.config/ccwt/config.toml and
-  # bind-mount each one read-only at /plugins/<name> inside the worker.
-  local mount_args=() plugin_dir_args=""
+  # Resolve host plugins from ~/.config/ccwt/config.toml.
+  # Each plugin dir is passed to sbx create as an extra :ro workspace, and
+  # to claude via --plugin-dir at run time.
+  local extra_workspaces=() plugin_dirs=()
   local entry marketplace plugin_name host_dir
   while IFS= read -r entry; do
     [[ -z $entry || $entry == null/null ]] && continue
@@ -118,29 +104,45 @@ cmd_spawn() {
       echo "ccwt spawn: skipping plugin '$entry' (not installed locally)" >&2
       continue
     fi
-    mount_args+=(-v "$host_dir:/plugins/$plugin_name:ro")
-    plugin_dir_args+=" --plugin-dir /plugins/$plugin_name"
+    extra_workspaces+=("$host_dir:ro")
+    plugin_dirs+=("$host_dir")
   done < <(ccwt_read_plugins)
 
-  docker run -d --name "$name" \
-    -v "$worktree:/workspace" \
-    ${mount_args[@]+"${mount_args[@]}"} \
-    -w /workspace \
-    "${CCWT_IMAGE:-tedsum/claude-code-mise:latest}" \
-    sleep infinity >/dev/null
+  # Create the sbx sandbox. Auth is handled transparently by the sbx proxy
+  # (configure once with: sbx secret set anthropic).
+  sbx create --name "$name" --quiet \
+    claude "$worktree" \
+    ${extra_workspaces[@]+"${extra_workspaces[@]}"}
 
-  ccwt_send_line "$pane" "docker exec -it $name claude${plugin_dir_args}"
+  # Open WezTerm pane anchored below the commander
+  pane=$(wezterm cli split-pane --bottom --percent 30 \
+    --pane-id "$commander" --cwd "$worktree")
+  echo "$pane" > "$(ccwt_pane_file "$branch")"
+
+  # Build sbx run command; append -- --plugin-dir args if any plugins resolved
+  local run_cmd="sbx run $name"
+  if [[ ${#plugin_dirs[@]} -gt 0 ]]; then
+    local pdir
+    for pdir in "${plugin_dirs[@]}"; do
+      run_cmd+=" --plugin-dir $pdir"
+    done
+    # plugin-dir args are claude args, need -- separator
+    run_cmd="sbx run $name --"
+    for pdir in "${plugin_dirs[@]}"; do
+      run_cmd+=" --plugin-dir $pdir"
+    done
+  fi
+  ccwt_send_line "$pane" "$run_cmd"
 
   if [[ -n $task ]]; then
-    # Wait for the REPL to be ready; an initial task sent too early is lost.
     sleep "${CCWT_SPAWN_WAIT:-5}"
     ccwt_send_line "$pane" "$task"
   fi
 
   echo "ccwt: spawned worker '$branch'"
-  echo "  pane-id   = $pane"
-  echo "  worktree  = $worktree"
-  echo "  container = $name"
+  echo "  pane-id  = $pane"
+  echo "  worktree = $worktree"
+  echo "  sandbox  = $name"
 }
 
 cmd_tell() {
@@ -158,8 +160,8 @@ cmd_tell() {
 }
 
 cmd_list() {
-  echo "# active worker containers"
-  docker ps --filter 'name=^ccwt-' --format 'table {{.Names}}\t{{.Status}}\t{{.Image}}' || true
+  echo "# active worker sandboxes"
+  sbx ls || true
   echo
   echo "# gwq worktrees"
   gwq list || true
@@ -171,7 +173,7 @@ cmd_cleanup() {
   name="ccwt-$(ccwt_sanitize "$branch")"
   pane_file=$(ccwt_pane_file "$branch")
 
-  docker rm -f "$name" 2>/dev/null || true
+  sbx rm "$name" 2>/dev/null || true
 
   if [[ -f $pane_file ]]; then
     pane=$(cat "$pane_file")
@@ -179,7 +181,7 @@ cmd_cleanup() {
     rm -f "$pane_file"
   fi
 
-  echo "ccwt: stopped container '$name' and killed pane."
+  echo "ccwt: removed sandbox '$name' and killed pane."
   echo "ccwt: run 'gwq remove $branch' to drop the worktree (not done automatically)."
 }
 
@@ -191,19 +193,21 @@ Commands:
   init                       Register the current WezTerm pane as commander.
   spawn <branch> [<task>]    Create a worktree, split a pane, start a worker.
   tell <branch> <message>    Send a message to a worker's REPL.
-  list                       List active workers and worktrees.
-  cleanup <branch>           Stop container and kill pane (worktree kept).
+  list                       List active sandboxes and worktrees.
+  cleanup <branch>           Remove sandbox and kill pane (worktree kept).
   help                       Show this help.
 
 Env:
-  CCWT_IMAGE        Override docker image (default: tedsum/claude-code-mise:latest)
-  CCWT_SPAWN_WAIT   Seconds to wait before sending the initial task (default: 5)
-  XDG_CONFIG_HOME   Used to locate config.toml (default: ~/.config)
+  CCWT_SPAWN_WAIT    Seconds to wait before sending the initial task (default: 5)
+  XDG_CONFIG_HOME    Used to locate config.toml (default: ~/.config)
+
+Auth:
+  Authentication is handled by the sbx proxy. Configure once with:
+    sbx secret set anthropic
 
 Config:
-  ~/.config/ccwt/config.toml — list of [[plugin]] entries (marketplace/name)
-  whose host-installed copy is bind-mounted into the worker and passed via
-  `claude --plugin-dir` so the worker sees the same plugins as the host.
+  ~/.config/ccwt/config.toml — [[marketplaces]] whose plugins are passed
+  to the worker as extra read-only workspaces and --plugin-dir args.
 
 See docs/worktree-workflow.md for design.
 EOF

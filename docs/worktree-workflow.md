@@ -3,7 +3,7 @@
 ## ゴール
 
 - 1 つの WezTerm ウィンドウ内で、**司令塔 claude** と **複数の worker claude** が共存する開発スタイルを定義する
-- 各 worker は独立した git worktree と Docker サンドボックス上で動作し、ホスト環境や他 worker と隔離される
+- 各 worker は独立した git worktree と Docker Sandboxes (sbx) 上で動作し、ホスト環境や他 worker と隔離される
 - 司令塔は worker pane を観察し、必要に応じて wezterm 経由で追加指示を投入できる
 - 本体リポジトリ (`~/src/...`) のクローン位置を汚さない
 
@@ -19,12 +19,12 @@
 ```
 +-------------------- WezTerm Window --------------------+
 |  司令塔 claude (host)                                  |
-|  $ ccwt spawn feature-x "<initial task>"                |
+|  $ ccwt spawn feature-x "<initial task>"               |
 +--------------------------------------------------------+
-|  worker A (docker exec → claude REPL, branch=feature-x)|
+|  worker A (sbx sandbox → claude REPL, branch=feature-x)|
 |  > implement ...                                       |
 +--------------------------------------------------------+
-|  worker B (docker exec → claude REPL, branch=feature-y)|
+|  worker B (sbx sandbox → claude REPL, branch=feature-y)|
 |  > implement ...                                       |
 +--------------------------------------------------------+
 ```
@@ -38,8 +38,8 @@
 
 ### Worker
 
-- Docker サンドボックス内で動く claude REPL（対話モード）
-- worktree ディレクトリだけが `/workspace` にマウントされ、他リポジトリやホスト全体には触れない
+- Docker Sandboxes (sbx) 上で動く claude REPL（対話モード）
+- worktree ディレクトリだけがマウントされ、他リポジトリやホスト全体には触れない
 - 出力は wezterm pane に流れ、人間と司令塔の双方が観察できる
 
 ### 通信
@@ -58,23 +58,18 @@
   ├─ feature-x/                        # worker A の作業空間
   └─ feature-y/                        # worker B の作業空間
 
-~/.local/state/ccwt/<repo>/             # 司令塔のローカル状態 (XDG 準拠)
+~/.local/state/ccwt/<repo>/           # 司令塔のローカル状態 (XDG 準拠)
   ├─ commander                         # 司令塔自身の pane-id
   └─ panes/<branch>                    # branch ごとの WezTerm pane-id
 ```
-
-- 本体は `~/src/...`
-- worktree は `~/worktrees/...` (gwq 既定)
-- 司令塔の状態は `~/.local/state/ccwt/<repo>/` （XDG_STATE_HOME 準拠）。リポジトリ内には**置かない**ので git status を汚さない
 
 ## 前提ツール
 
 | ツール | 用途 | 入手 |
 |---|---|---|
-| `gwq` | worktree の add / list / get / remove | `mise.toml` の `[tools]` に追加 |
+| `gwq` | worktree の add / list / get / remove | `mise.toml` の `[tools]` |
 | `wezterm` (cli) | pane の split / send-text / get-text | ホストに既存 |
-| `docker` | サンドボックス起動 | ホストに既存 |
-| `tedsum/claude-code-mise` | サンドボックスイメージ | 本リポの `Dockerfile` |
+| `sbx` | Docker Sandboxes CLI (sandbox 作成・認証・ライフサイクル) | ホストに既存 |
 
 ## ライフサイクル
 
@@ -84,8 +79,7 @@
 ccwt init
 ```
 
-- 現在の WezTerm pane-id (`wezterm cli list --format json` から特定) を `~/.local/state/ccwt/<repo>/commander` に保存
-- 以降の `ccwt spawn` はこの pane を基点にして下に pane を積む
+- 現在の WezTerm pane-id (`$WEZTERM_PANE`) を `~/.local/state/ccwt/<repo>/commander` に保存
 
 ### 1. Spawn
 
@@ -95,12 +89,13 @@ ccwt spawn <branch> ["<initial-task>"]
 
 実行手順:
 
-1. `gwq add <branch>` で worktree を作成（パスは `~/worktrees/github.com/<owner>/<repo>/<branch>/`）
-2. `wezterm cli split-pane --bottom --percent 30 --pane-id $(cat ~/.local/state/ccwt/<repo>/commander) --cwd $(gwq get <branch>)` で **常に司令塔の下** に pane を追加
-3. 返却された `pane-id` を `~/.local/state/ccwt/<repo>/panes/<branch>` に保存
-4. `docker run -d --name ccwt-<branch> -v $(gwq get <branch>):/workspace tedsum/claude-code-mise sleep infinity` でサンドボックスを起動
-5. pane 内で `docker exec -it ccwt-<branch> claude` を叩いて REPL に入る（`send-text` で投入）
-6. `<initial-task>` が指定されていれば、続けて pane に送信
+1. `gwq add [-b] <branch>` で worktree を作成（パスは `~/worktrees/github.com/<owner>/<repo>/<branch>/`）
+2. `sbx create --name ccwt-<branch> claude <worktree> [plugin_dirs:ro...]` でサンドボックスを作成
+3. `wezterm cli split-pane --bottom` で司令塔の下に pane を追加し、pane-id を保存
+4. pane 内で `sbx run ccwt-<branch> [-- --plugin-dir ...]` を実行して REPL に入る
+5. `<initial-task>` が指定されていれば、続けて pane に送信
+
+認証は sbx プロキシが透過的に処理します（`sbx secret set anthropic` で事前設定）。
 
 ### 2. 追加指示
 
@@ -114,12 +109,10 @@ ccwt tell <branch> "<message>"
 
 ### 3. 完了検知
 
-対話モードでは「タスクが終わった」を機械的に判定する確実な方法がない。本ワークフローではシンプルに以下のみで運用する:
+対話モードでは「タスクが終わった」を機械的に判定する確実な方法がない。シンプルに以下のみで運用:
 
 - **pane 観察**: 司令塔が必要に応じて `wezterm cli get-text --pane-id <id> --start-line -200` で末尾を読む
 - **人間判断**: 最終確認は人間が pane を見て行う
-
-git コミットメッセージに完了マーカーを埋め込むような運用は**しない**（コミット履歴を汚さない）。
 
 ### 4. Cleanup
 
@@ -127,19 +120,16 @@ git コミットメッセージに完了マーカーを埋め込むような運�
 ccwt cleanup <branch>
 ```
 
-1. `docker kill ccwt-<branch> && docker rm ccwt-<branch>`
-2. `wezterm cli kill-pane --pane-id <id>`
-3. `~/.local/state/ccwt/<repo>/panes/<branch>` を削除
-4. `gwq remove <branch>` （未コミット変更が残っていれば人間に確認）
+1. `sbx rm ccwt-<branch>` でサンドボックスを削除
+2. `wezterm cli kill-pane --pane-id <id>` で pane を削除
+3. pane-id ファイルを削除
+4. `gwq remove <branch>` は手動（未コミット変更があれば人間が判断）
 
 ### 5. その他コマンド
 
 | コマンド | 用途 |
 |---|---|
-| `ccwt list` | 起動中の worker 一覧（`gwq list` と `docker ps` を JOIN） |
-| `ccwt attach <branch>` | 既存 pane にフォーカス移動 (`wezterm cli activate-pane --pane-id <id>`) |
-| `ccwt kill <branch>` | サンドボックスのみ落とす（worktree は残す） |
-| `ccwt logs <branch>` | pane の末尾 N 行を司令塔の標準出力に流す |
+| `ccwt list` | `sbx ls` + `gwq list` で起動中の sandbox と worktree を表示 |
 
 ## WezTerm 連携の詳細
 
@@ -152,15 +142,11 @@ PANE_ID=$(wezterm cli split-pane \
   --cwd "$WORKTREE_PATH")
 ```
 
-- `--bottom`: 司令塔の下に積む
-- `--percent 30`: 司令塔: 直前領域 = 7 : 3 で分割
-- 常に司令塔の pane を基点にするため、worker は司令塔の真下に積み上がる
-
 ### テキスト投入
 
 ```bash
-wezterm cli send-text --pane-id "$PANE_ID" "$MESSAGE"
-printf '\r' | wezterm cli send-text --pane-id "$PANE_ID" --no-paste
+wezterm cli send-text --no-paste --pane-id "$PANE_ID" "$MESSAGE"
+printf '\r' | wezterm cli send-text --no-paste --pane-id "$PANE_ID"
 ```
 
 ### 出力取得
@@ -171,11 +157,7 @@ wezterm cli get-text --pane-id "$PANE_ID" --start-line -200
 
 ## worker への plugin 引き継ぎ
 
-ホスト Claude にインストール済みの plugin を worker でも使うため、`ccwt spawn` は `~/.config/ccwt/config.toml` を読んで bind-mount + `--plugin-dir` を組み立てます。
-
-### 設定ファイル
-
-`~/.config/ccwt/config.toml`:
+`~/.config/ccwt/config.toml` に列挙した plugin を、`ccwt spawn` 時に sbx の追加 workspace として read-only マウントし `claude --plugin-dir` で渡します。
 
 ```toml
 [[marketplaces]]
@@ -191,43 +173,31 @@ plugins = ["github"]
 
 各 (marketplace, plugin) ペアについて:
 
-1. `~/.claude/plugins/cache/<marketplace>/<name>/` 配下を `ls | sort -V | tail -1` で最新ディレクトリ (semver / `unknown`) に解決
-2. `docker run` に `-v <host_dir>:/plugins/<name>:ro` を追加
-3. `docker exec ... claude` に `--plugin-dir /plugins/<name>` を追加
+1. `~/.claude/plugins/cache/<marketplace>/<name>/` 配下を `ls | sort -V | tail -1` で最新ディレクトリに解決
+2. `sbx create` に追加 workspace として `:ro` で渡す（ホストと同じパスでマウントされる）
+3. `sbx run` に `-- --plugin-dir <host_path>` を追加
 
-config 不在、`yq`/`jq` 不在、plugin 未インストール — いずれも spawn は abort せず、その plugin だけスキップしてプレーンな worker を起動。
+config 不在、`yq`/`jq` 不在、plugin 未インストール — いずれも spawn は abort せず、その plugin だけスキップ。
 
-### 認証情報は引き継がない
+## 認証
 
-`~/.claude/` 全体ではなく、`~/.claude/plugins/cache/<m>/<n>/<v>/` の個別ディレクトリのみマウントするので、`history.jsonl`・`sessions/`・`.credentials.json` などは worker に渡りません。worker 側 claude の認証は別経路 (ベースイメージ内の claude が持つ認証や、別途渡す API キー) に依存します。
+sbx プロキシが API 認証を透過的に処理するため、worker に認証情報を手動で渡す必要はありません。
 
-## Docker サンドボックスの要件
+```bash
+# ホストで 1 回だけ設定
+sbx secret set anthropic
+```
 
-現状の `tedsum/claude-code-mise` に対する確認・追加事項:
-
-- [ ] `claude` CLI が PATH に通っている
-- [ ] `git` が同梱されている
-- [ ] worktree マウント時に owner mismatch で git が拒否しないよう、`git config --global safe.directory '*'` を設定
-- [ ] 作業ディレクトリを `/workspace` にする (`WORKDIR /workspace`)
-- [ ] ANTHROPIC_API_KEY をホストから安全に渡す経路を決める（`docker run --env-file` か OAuth）
-
-## 実装方針
-
-- MVP は **Bash スクリプト** で実装する (`bin/ccwt` = claude code worktree)
-- サブコマンドは case 文でディスパッチ
-- 依存: bash 4+, gwq, wezterm, docker, git
-- 運用が固まったら Go への書き換えを検討（gwq と同じ路線）
+worker 内の claude が Anthropic API を呼ぶと、sbx プロキシが自動で認証を注入します。rate limit はホストと worker で共有プールになります。
 
 ## オープン課題
 
-1. **司令塔の権限**: 司令塔も claude code セッション内で動くため、`ccwt` から `wezterm cli`・`docker`・`gwq` を叩く権限を `.claude/settings.json` の permission に追加する必要がある
-2. **認証情報の引き渡し**: ホストの `~/.claude/` をマウントするか、API キーを env で渡すか、OAuth フローをサンドボックス内で完結させるか
-3. **依存関係のある worker**: worker B が worker A の成果物に依存するケースは MVP のスコープ外（人間が `git merge` してから B を spawn）
-4. **pane が増えすぎた場合**: 一定数を超えたら自動で tab に切り替える等の拡張は将来検討
+1. **pane が増えすぎた場合**: 一定数を超えたら自動で tab に切り替える等の拡張は将来検討
+2. **依存関係のある worker**: worker B が worker A の成果物に依存するケースは MVP のスコープ外（人間が `git merge` してから B を spawn）
 
 ## 関連
 
 - `mise.toml`: ツールチェイン管理
-- `Dockerfile`: サンドボックスイメージ定義
 - gwq: <https://github.com/d-kuro/gwq>
+- Docker Sandboxes: <https://docs.docker.com/ai/gordon/docker-sandboxes/>
 - WezTerm CLI: <https://wezfurlong.org/wezterm/cli/general.html>
