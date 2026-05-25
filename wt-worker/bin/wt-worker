@@ -26,6 +26,49 @@ wt_worker_config_file() {
   echo "${XDG_CONFIG_HOME:-$HOME/.config}/wt-worker/config.toml"
 }
 
+# Resolve "github.com/<owner>/<repo>" from the current repo's origin URL.
+# Returns non-zero if origin is missing or not parseable.
+wt_worker_origin_path() {
+  local url
+  url=$(git remote get-url origin 2>/dev/null) || return 1
+  [[ -n $url ]] || return 1
+  url=${url%.git}
+  # ssh forms: git@host:owner/repo, ssh://git@host/owner/repo
+  url=${url#ssh://}
+  url=${url#git@}
+  url=${url/:/\/}
+  # https forms: https://host/owner/repo
+  url=${url#https://}
+  url=${url#http://}
+  echo "$url"
+}
+
+# Mint a scoped GitHub App installation token and store it as the sandbox's
+# per-sandbox `github` secret. Best-effort: any failure just emits a warning
+# and leaves the sandbox without GitHub auth (worker can still read public
+# repos but cannot push). Requires uv + op CLI; see wt-worker-gh-token.
+wt_worker_inject_github_secret() {
+  local sandbox=$1 origin=$2
+  local script_dir token_bin err_file token
+  script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+  token_bin="$script_dir/wt-worker-gh-token"
+  if [[ ! -x $token_bin ]]; then
+    echo "wt-worker spawn: $token_bin not found, skipping github auth" >&2
+    return 0
+  fi
+  err_file=$(mktemp -t wt-worker-gh-token.XXXXXX)
+  if token=$("$token_bin" --origin "$origin" 2>"$err_file"); then
+    rm -f "$err_file"
+    if [[ -n $token ]]; then
+      printf '%s' "$token" | sbx secret set "$sandbox" github >/dev/null
+      echo "wt-worker spawn: scoped github token stored on sandbox=$sandbox" >&2
+    fi
+  else
+    echo "wt-worker spawn: skipping github auth ($(cat "$err_file"))" >&2
+    rm -f "$err_file"
+  fi
+}
+
 # Emit one "<marketplace>/<plugin>" line per entry in config.toml.
 # Silently emits nothing if the config file or yq/jq is missing.
 wt_worker_read_plugins() {
@@ -85,6 +128,16 @@ cmd_spawn() {
   sbx create --branch="$branch" --name "$name" --quiet \
     claude "$toplevel" \
     ${extra_workspaces[@]+"${extra_workspaces[@]}"}
+
+  # Mint a scoped GitHub App installation token for this sandbox (best-effort).
+  # Must run AFTER sbx create (sandbox name must exist) and BEFORE sbx run
+  # (the proxy reads secrets at run time).
+  local origin
+  if origin=$(wt_worker_origin_path); then
+    wt_worker_inject_github_secret "$name" "$origin"
+  else
+    echo "wt-worker spawn: no 'origin' remote, skipping github auth" >&2
+  fi
 
   worktree="$toplevel/.sbx/$name-worktrees/$(wt_worker_sanitize "$branch")"
 
@@ -196,12 +249,16 @@ Env:
   XDG_CONFIG_HOME       Used to locate config.toml (default: ~/.config)
 
 Auth:
-  Authentication is handled by the sbx proxy. Configure once with:
-    sbx secret set anthropic
+  Anthropic: sbx secret set anthropic                    (global, once)
+  GitHub (simple):  sbx secret set -g github             (global PAT fallback)
+  GitHub (scoped):  ~/.config/wt-worker/repos.toml       (GitHub App + 1Password)
+    - spawn mints a per-sandbox token scoped to the current repo + configured
+      permissions; expires in 1 hour. See examples/repos.toml.
 
 Config:
   ~/.config/wt-worker/config.toml — [[marketplaces]] whose plugins are passed
   to the worker as extra read-only workspaces and --plugin-dir args.
+  ~/.config/wt-worker/repos.toml  — GitHub App per-org/repo policy (see above).
 
 Worktrees are created under .sbx/ in the repository root.
 Add .sbx/ to .gitignore to keep git status clean.
