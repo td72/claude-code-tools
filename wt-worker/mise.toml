@@ -1,6 +1,11 @@
 [env]
+IMAGE = "tedsum/claude-code-mise"
+TAG = "latest"
 _.path = ["./bin"]
 
 [tasks.lint]
-description = "Lint bin/wt-worker (shellcheck)"
-run = "shellcheck bin/wt-worker"
+description = "Lint wt-worker (hadolint + shellcheck)"
+run = [
+  "hadolint Dockerfile",
+  "shellcheck bin/wt-worker",
+]

@@ -2,5 +2,30 @@
 # Paths are relative to the repository root.
 
 ["wt-worker:lint"]
-description = "Lint wt-worker/bin/wt-worker (shellcheck)"
-run = "shellcheck wt-worker/bin/wt-worker"
+description = "Lint wt-worker (hadolint Dockerfile + shellcheck bin/wt-worker)"
+run = [
+  "hadolint wt-worker/Dockerfile",
+  "shellcheck wt-worker/bin/wt-worker",
+]
+
+["wt-worker:build"]
+description = "Build the sandbox image locally"
+run = "docker build -t $IMAGE:$TAG wt-worker/"
+
+["wt-worker:push"]
+description = "Build and push the sandbox image to the registry"
+run = "docker build -t $IMAGE:$TAG --push wt-worker/"
+
+["wt-worker:shell"]
+description = "Run the built image and open a bash shell for inspection"
+depends = ["wt-worker:build"]
+run = "docker run --rm -it $IMAGE:$TAG bash"
+
+["wt-worker:verify"]
+description = "Verify mise is installed and activatable in the built image"
+depends = ["wt-worker:build"]
+run = "docker run --rm $IMAGE:$TAG bash -lc 'mise --version && which mise'"
+
+["wt-worker:ci"]
+description = "Run lint and build (use in CI)"
+depends = ["wt-worker:lint", "wt-worker:build"]
