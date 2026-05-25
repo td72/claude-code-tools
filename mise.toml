@@ -3,7 +3,6 @@ hadolint = "latest"
 shellcheck = "latest"
 jq = "latest"
 yq = "latest"
-"github:d-kuro/gwq" = "latest"
 
 [env]
 IMAGE = "tedsum/claude-code-mise"

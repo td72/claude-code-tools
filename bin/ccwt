@@ -69,7 +69,7 @@ cmd_init() {
 cmd_spawn() {
   local branch=${1:?usage: ccwt spawn <branch> [initial-task]}
   local task=${2:-}
-  local commander pane worktree name commander_file
+  local commander pane name commander_file toplevel worktree
   commander_file=$(ccwt_commander_file)
   if [[ ! -f $commander_file ]]; then
     echo "ccwt spawn: run 'ccwt init' first." >&2
@@ -77,22 +77,10 @@ cmd_spawn() {
   fi
   commander=$(cat "$commander_file")
   name="ccwt-$(ccwt_sanitize "$branch")"
-
-  # Create worktree via gwq
-  if git rev-parse --verify --quiet "refs/heads/$branch" >/dev/null 2>&1; then
-    gwq add "$branch"
-  else
-    gwq add -b "$branch"
-  fi
-  worktree=$(gwq get "$branch")
-
-  # Pre-trust the worktree's mise.toml to avoid noise in the pane
-  if [[ -f "$worktree/mise.toml" ]] && command -v mise >/dev/null 2>&1; then
-    mise trust --quiet "$worktree/mise.toml" >/dev/null 2>&1 || true
-  fi
+  toplevel=$(git rev-parse --show-toplevel)
 
   # Resolve host plugins from ~/.config/ccwt/config.toml.
-  # Each plugin dir is passed to sbx create as an extra :ro workspace, and
+  # Each plugin dir is passed to sbx as an extra :ro workspace and
   # to claude via --plugin-dir at run time.
   local extra_workspaces=() plugin_dirs=()
   local entry marketplace plugin_name host_dir
@@ -108,13 +96,15 @@ cmd_spawn() {
     plugin_dirs+=("$host_dir")
   done < <(ccwt_read_plugins)
 
-  # Create the sbx sandbox. Auth is handled transparently by the sbx proxy
-  # (configure once with: sbx secret set anthropic).
-  sbx create --name "$name" --quiet \
-    claude "$worktree" \
+  # Create sandbox + worktree via sbx. Auth handled by sbx proxy.
+  # Worktree lands at <toplevel>/.sbx/<name>-worktrees/<branch-sanitized>/
+  sbx create --branch="$branch" --name "$name" --quiet \
+    claude "$toplevel" \
     ${extra_workspaces[@]+"${extra_workspaces[@]}"}
 
-  # Open WezTerm pane anchored below the commander
+  worktree="$toplevel/.sbx/$name-worktrees/$(ccwt_sanitize "$branch")"
+
+  # Open WezTerm pane anchored below the commander, cwd = worktree
   pane=$(wezterm cli split-pane --bottom --percent 30 \
     --pane-id "$commander" --cwd "$worktree")
   echo "$pane" > "$(ccwt_pane_file "$branch")"
@@ -122,12 +112,8 @@ cmd_spawn() {
   # Build sbx run command; append -- --plugin-dir args if any plugins resolved
   local run_cmd="sbx run $name"
   if [[ ${#plugin_dirs[@]} -gt 0 ]]; then
-    local pdir
-    for pdir in "${plugin_dirs[@]}"; do
-      run_cmd+=" --plugin-dir $pdir"
-    done
-    # plugin-dir args are claude args, need -- separator
     run_cmd="sbx run $name --"
+    local pdir
     for pdir in "${plugin_dirs[@]}"; do
       run_cmd+=" --plugin-dir $pdir"
     done
@@ -160,20 +146,25 @@ cmd_tell() {
 }
 
 cmd_list() {
-  echo "# active worker sandboxes"
   sbx ls || true
-  echo
-  echo "# gwq worktrees"
-  gwq list || true
 }
 
 cmd_cleanup() {
   local branch=${1:?usage: ccwt cleanup <branch>}
-  local name pane pane_file
+  local name pane pane_file toplevel worktree_dir
   name="ccwt-$(ccwt_sanitize "$branch")"
   pane_file=$(ccwt_pane_file "$branch")
+  toplevel=$(git rev-parse --show-toplevel)
+  worktree_dir="$toplevel/.sbx/$name-worktrees"
 
   sbx rm "$name" 2>/dev/null || true
+
+  # sbx rm is best-effort on worktree cleanup; remove explicitly if still present
+  if [[ -d $worktree_dir ]]; then
+    git worktree remove --force "$worktree_dir/$(ccwt_sanitize "$branch")" 2>/dev/null || true
+    rmdir "$worktree_dir" 2>/dev/null || true
+    git branch -D "$branch" 2>/dev/null || true
+  fi
 
   if [[ -f $pane_file ]]; then
     pane=$(cat "$pane_file")
@@ -182,7 +173,6 @@ cmd_cleanup() {
   fi
 
   echo "ccwt: removed sandbox '$name' and killed pane."
-  echo "ccwt: run 'gwq remove $branch' to drop the worktree (not done automatically)."
 }
 
 cmd_help() {
@@ -191,10 +181,10 @@ Usage: ccwt <command> [args...]
 
 Commands:
   init                       Register the current WezTerm pane as commander.
-  spawn <branch> [<task>]    Create a worktree, split a pane, start a worker.
+  spawn <branch> [<task>]    Create a worktree + sandbox, start a worker.
   tell <branch> <message>    Send a message to a worker's REPL.
-  list                       List active sandboxes and worktrees.
-  cleanup <branch>           Remove sandbox and kill pane (worktree kept).
+  list                       List active sandboxes (sbx ls).
+  cleanup <branch>           Remove sandbox and kill pane.
   help                       Show this help.
 
 Env:
@@ -208,6 +198,9 @@ Auth:
 Config:
   ~/.config/ccwt/config.toml — [[marketplaces]] whose plugins are passed
   to the worker as extra read-only workspaces and --plugin-dir args.
+
+Worktrees are created under .sbx/ in the repository root.
+Add .sbx/ to .gitignore to keep git status clean.
 
 See docs/worktree-workflow.md for design.
 EOF
