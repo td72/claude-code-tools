@@ -7,14 +7,14 @@ yq = "latest"
 [env]
 IMAGE = "tedsum/claude-code-mise"
 TAG = "latest"
-_.path = ["./wt-worker/bin"]
+
+[task_config]
+includes = ["wt-worker/mise-tasks.toml"]
 
 [tasks.lint]
-description = "Lint Dockerfile (hadolint) and wt-worker/bin/wt-worker (shellcheck)"
-run = [
-  "hadolint Dockerfile",
-  "shellcheck wt-worker/bin/wt-worker",
-]
+description = "Lint all (Dockerfile + all plugins)"
+depends = ["wt-worker:lint"]
+run = "hadolint Dockerfile"
 
 [tasks.build]
 description = "Build the sandbox image locally"

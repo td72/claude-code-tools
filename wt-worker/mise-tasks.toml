@@ -1,0 +1,6 @@
+# Tasks included by the root mise.toml via task_config.includes.
+# Paths are relative to the repository root.
+
+["wt-worker:lint"]
+description = "Lint wt-worker/bin/wt-worker (shellcheck)"
+run = "shellcheck wt-worker/bin/wt-worker"

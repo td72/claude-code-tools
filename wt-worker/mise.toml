@@ -1,0 +1,6 @@
+[env]
+_.path = ["./bin"]
+
+[tasks.lint]
+description = "Lint bin/wt-worker (shellcheck)"
+run = "shellcheck bin/wt-worker"
