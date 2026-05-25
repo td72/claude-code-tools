@@ -1,36 +1,36 @@
 #!/usr/bin/env bash
-# ccwt - Claude Code WorkTree manager
+# wt-worker - Claude Code parallel worker manager (WorkTree + WezTerm)
 # See docs/worktree-workflow.md for design.
 set -euo pipefail
 
-ccwt_state_dir() {
+wt_worker_state_dir() {
   local repo
   repo=$(basename "$(git rev-parse --show-toplevel)")
-  echo "${XDG_STATE_HOME:-$HOME/.local/state}/ccwt/${repo}"
+  echo "${XDG_STATE_HOME:-$HOME/.local/state}/wt-worker/${repo}"
 }
 
-ccwt_pane_file() { echo "$(ccwt_state_dir)/panes/$(ccwt_sanitize "$1")"; }
+wt_worker_pane_file() { echo "$(wt_worker_state_dir)/panes/$(wt_worker_sanitize "$1")"; }
 
-ccwt_sanitize() {
-  # branch -> safe identifier for sbx name + filename (sbx allows letters, numbers, hyphens, periods, +, -)
+wt_worker_sanitize() {
+  # branch -> safe identifier for sbx name + filename
   printf '%s' "$1" | tr '/' '-'
 }
 
-ccwt_send_line() {
+wt_worker_send_line() {
   local pane=$1 text=$2
   wezterm cli send-text --no-paste --pane-id "$pane" "$text"
   printf '\r' | wezterm cli send-text --no-paste --pane-id "$pane"
 }
 
-ccwt_config_file() {
-  echo "${XDG_CONFIG_HOME:-$HOME/.config}/ccwt/config.toml"
+wt_worker_config_file() {
+  echo "${XDG_CONFIG_HOME:-$HOME/.config}/wt-worker/config.toml"
 }
 
 # Emit one "<marketplace>/<plugin>" line per entry in config.toml.
 # Silently emits nothing if the config file or yq/jq is missing.
-ccwt_read_plugins() {
+wt_worker_read_plugins() {
   local cfg
-  cfg=$(ccwt_config_file)
+  cfg=$(wt_worker_config_file)
   [[ -f $cfg ]] || return 0
   command -v yq >/dev/null 2>&1 || return 0
   command -v jq >/dev/null 2>&1 || return 0
@@ -40,7 +40,7 @@ ccwt_read_plugins() {
 
 # Resolve <marketplace>/<name> to the latest version directory under
 # ~/.claude/plugins/cache/. Returns non-zero if not installed locally.
-ccwt_resolve_plugin_dir() {
+wt_worker_resolve_plugin_dir() {
   local marketplace=$1 name=$2
   local base="$HOME/.claude/plugins/cache/$marketplace/$name"
   [[ -d $base ]] || return 1
@@ -52,35 +52,33 @@ ccwt_resolve_plugin_dir() {
 }
 
 cmd_spawn() {
-  local branch=${1:?usage: ccwt spawn <branch> [initial-task]}
+  local branch=${1:?usage: wt-worker spawn <branch> [initial-task]}
   local task=${2:-}
   local commander pane name toplevel worktree
   commander=${WEZTERM_PANE:-}
   if [[ -z $commander ]]; then
-    echo "ccwt spawn: WEZTERM_PANE is not set. Run inside a WezTerm pane." >&2
+    echo "wt-worker spawn: WEZTERM_PANE is not set. Run inside a WezTerm pane." >&2
     exit 1
   fi
-  name="ccwt-$(ccwt_sanitize "$branch")"
+  name="wt-worker-$(wt_worker_sanitize "$branch")"
   toplevel=$(git rev-parse --show-toplevel)
 
-  mkdir -p "$(ccwt_state_dir)/panes"
+  mkdir -p "$(wt_worker_state_dir)/panes"
 
-  # Resolve host plugins from ~/.config/ccwt/config.toml.
-  # Each plugin dir is passed to sbx as an extra :ro workspace and
-  # to claude via --plugin-dir at run time.
+  # Resolve host plugins from ~/.config/wt-worker/config.toml.
   local extra_workspaces=() plugin_dirs=()
   local entry marketplace plugin_name host_dir
   while IFS= read -r entry; do
     [[ -z $entry || $entry == null/null ]] && continue
     marketplace=${entry%%/*}
     plugin_name=${entry#*/}
-    if ! host_dir=$(ccwt_resolve_plugin_dir "$marketplace" "$plugin_name"); then
-      echo "ccwt spawn: skipping plugin '$entry' (not installed locally)" >&2
+    if ! host_dir=$(wt_worker_resolve_plugin_dir "$marketplace" "$plugin_name"); then
+      echo "wt-worker spawn: skipping plugin '$entry' (not installed locally)" >&2
       continue
     fi
     extra_workspaces+=("$host_dir:ro")
     plugin_dirs+=("$host_dir")
-  done < <(ccwt_read_plugins)
+  done < <(wt_worker_read_plugins)
 
   # Create sandbox + worktree via sbx. Auth handled by sbx proxy.
   # Worktree lands at <toplevel>/.sbx/<name>-worktrees/<branch-sanitized>/
@@ -88,12 +86,12 @@ cmd_spawn() {
     claude "$toplevel" \
     ${extra_workspaces[@]+"${extra_workspaces[@]}"}
 
-  worktree="$toplevel/.sbx/$name-worktrees/$(ccwt_sanitize "$branch")"
+  worktree="$toplevel/.sbx/$name-worktrees/$(wt_worker_sanitize "$branch")"
 
   # Open WezTerm pane anchored below the commander, cwd = worktree
   pane=$(wezterm cli split-pane --bottom --percent 30 \
     --pane-id "$commander" --cwd "$worktree")
-  echo "$pane" > "$(ccwt_pane_file "$branch")"
+  echo "$pane" > "$(wt_worker_pane_file "$branch")"
 
   # Build sbx run command; append -- --plugin-dir args if any plugins resolved
   local run_cmd="sbx run $name"
@@ -104,47 +102,47 @@ cmd_spawn() {
       run_cmd+=" --plugin-dir $pdir"
     done
   fi
-  ccwt_send_line "$pane" "$run_cmd"
+  wt_worker_send_line "$pane" "$run_cmd"
 
   if [[ -n $task ]]; then
-    sleep "${CCWT_SPAWN_WAIT:-5}"
-    ccwt_send_line "$pane" "$task"
+    sleep "${WT_WORKER_SPAWN_WAIT:-5}"
+    wt_worker_send_line "$pane" "$task"
   fi
 
-  echo "ccwt: spawned worker '$branch'"
+  echo "wt-worker: spawned '$branch'"
   echo "  pane-id  = $pane"
   echo "  worktree = $worktree"
   echo "  sandbox  = $name"
 }
 
 cmd_tell() {
-  local branch=${1:?usage: ccwt tell <branch> <message>}
+  local branch=${1:?usage: wt-worker tell <branch> <message>}
   shift
   local message="$*"
   local pane_file pane
-  pane_file=$(ccwt_pane_file "$branch")
+  pane_file=$(wt_worker_pane_file "$branch")
   if [[ ! -f $pane_file ]]; then
-    echo "ccwt tell: no worker named '$branch'." >&2
+    echo "wt-worker tell: no worker named '$branch'." >&2
     exit 1
   fi
   pane=$(cat "$pane_file")
-  ccwt_send_line "$pane" "$message"
+  wt_worker_send_line "$pane" "$message"
 }
 
 cmd_logs() {
-  local branch=${1:?usage: ccwt logs <branch> [-n <lines>]}
+  local branch=${1:?usage: wt-worker logs <branch> [-n <lines>]}
   local lines=200
   shift
   while [[ $# -gt 0 ]]; do
     case "$1" in
       -n) lines=${2:?-n requires a number}; shift 2 ;;
-      *) echo "ccwt logs: unknown option '$1'" >&2; exit 1 ;;
+      *) echo "wt-worker logs: unknown option '$1'" >&2; exit 1 ;;
     esac
   done
   local pane_file pane
-  pane_file=$(ccwt_pane_file "$branch")
+  pane_file=$(wt_worker_pane_file "$branch")
   if [[ ! -f $pane_file ]]; then
-    echo "ccwt logs: no worker named '$branch'." >&2
+    echo "wt-worker logs: no worker named '$branch'." >&2
     exit 1
   fi
   pane=$(cat "$pane_file")
@@ -156,10 +154,10 @@ cmd_list() {
 }
 
 cmd_cleanup() {
-  local branch=${1:?usage: ccwt cleanup <branch>}
+  local branch=${1:?usage: wt-worker cleanup <branch>}
   local name pane pane_file toplevel worktree_dir
-  name="ccwt-$(ccwt_sanitize "$branch")"
-  pane_file=$(ccwt_pane_file "$branch")
+  name="wt-worker-$(wt_worker_sanitize "$branch")"
+  pane_file=$(wt_worker_pane_file "$branch")
   toplevel=$(git rev-parse --show-toplevel)
   worktree_dir="$toplevel/.sbx/$name-worktrees"
 
@@ -167,7 +165,7 @@ cmd_cleanup() {
 
   # sbx rm is best-effort on worktree cleanup; remove explicitly if still present
   if [[ -d $worktree_dir ]]; then
-    git worktree remove --force "$worktree_dir/$(ccwt_sanitize "$branch")" 2>/dev/null || true
+    git worktree remove --force "$worktree_dir/$(wt_worker_sanitize "$branch")" 2>/dev/null || true
     rmdir "$worktree_dir" 2>/dev/null || true
     git branch -D "$branch" 2>/dev/null || true
   fi
@@ -178,12 +176,12 @@ cmd_cleanup() {
     rm -f "$pane_file"
   fi
 
-  echo "ccwt: removed sandbox '$name' and killed pane."
+  echo "wt-worker: removed sandbox '$name' and killed pane."
 }
 
 cmd_help() {
   cat <<'EOF'
-Usage: ccwt <command> [args...]
+Usage: wt-worker <command> [args...]
 
 Commands:
   spawn <branch> [<task>]    Create a worktree + sandbox, start a worker.
@@ -194,15 +192,15 @@ Commands:
   help                       Show this help.
 
 Env:
-  CCWT_SPAWN_WAIT    Seconds to wait before sending the initial task (default: 5)
-  XDG_CONFIG_HOME    Used to locate config.toml (default: ~/.config)
+  WT_WORKER_SPAWN_WAIT  Seconds to wait before sending the initial task (default: 5)
+  XDG_CONFIG_HOME       Used to locate config.toml (default: ~/.config)
 
 Auth:
   Authentication is handled by the sbx proxy. Configure once with:
     sbx secret set anthropic
 
 Config:
-  ~/.config/ccwt/config.toml — [[marketplaces]] whose plugins are passed
+  ~/.config/wt-worker/config.toml — [[marketplaces]] whose plugins are passed
   to the worker as extra read-only workspaces and --plugin-dir args.
 
 Worktrees are created under .sbx/ in the repository root.
@@ -222,7 +220,7 @@ main() {
     list)    cmd_list "$@" ;;
     cleanup) cmd_cleanup "$@" ;;
     help|-h|--help) cmd_help ;;
-    *) echo "ccwt: unknown command '$cmd'" >&2; cmd_help; exit 2 ;;
+    *) echo "wt-worker: unknown command '$cmd'" >&2; cmd_help; exit 2 ;;
   esac
 }
 

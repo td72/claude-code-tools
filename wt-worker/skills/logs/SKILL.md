@@ -3,7 +3,7 @@ description: Read a worker Claude's pane output to observe its progress and asse
 disable-model-invocation: true
 ---
 
-# /ccwt:logs
+# /worker:logs
 
 Read the recent output of a worker's WezTerm pane. The user invoked this skill with: `$ARGUMENTS`
 
@@ -12,10 +12,10 @@ Parse `$ARGUMENTS` as: the first token is the branch name; an optional `-n <numb
 Run:
 
 ```bash
-ccwt logs "<branch>" [-n <lines>]
+wt-worker logs "<branch>" [-n <lines>]
 ```
 
 Show the output verbatim, then briefly assess:
 - Is the worker still running (claude prompt visible at bottom)?
 - Does the output show a completed task, an error, or a question directed at the user?
-- Is any follow-up needed — a `/ccwt:tell` with clarification, or is the worker done?
+- Is any follow-up needed — a `/worker:tell` with clarification, or is the worker done?

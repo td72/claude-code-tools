@@ -6,9 +6,9 @@
   },
   "plugins": [
     {
-      "name": "ccwt",
-      "source": "./",
-      "description": "Spawn worker Claudes in Docker sandboxes on dedicated git worktrees, observable through WezTerm panes."
+      "name": "wt-worker",
+      "source": "./worker",
+      "description": "Spawn and manage parallel Claude worker agents in Docker sandboxes on dedicated git worktrees, observable through WezTerm panes."
     }
   ]
 }

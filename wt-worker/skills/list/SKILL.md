@@ -1,14 +1,14 @@
 ---
-description: List active ccwt worker sandboxes.
+description: List active worker worker sandboxes.
 disable-model-invocation: true
 ---
 
-# /ccwt:list
+# /worker:list
 
 Run:
 
 ```bash
-ccwt list
+wt-worker list
 ```
 
 Show the output to the user verbatim.
