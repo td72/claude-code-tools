@@ -9,7 +9,6 @@ ccwt_state_dir() {
   echo "${XDG_STATE_HOME:-$HOME/.local/state}/ccwt/${repo}"
 }
 
-ccwt_commander_file() { echo "$(ccwt_state_dir)/commander"; }
 ccwt_pane_file() { echo "$(ccwt_state_dir)/panes/$(ccwt_sanitize "$1")"; }
 
 ccwt_sanitize() {
@@ -52,32 +51,19 @@ ccwt_resolve_plugin_dir() {
   echo "$base/$latest"
 }
 
-cmd_init() {
-  local state pane
-  state=$(ccwt_state_dir)
-  mkdir -p "$state/panes"
-  pane=${WEZTERM_PANE:-}
-  if [[ -z $pane ]]; then
-    echo "ccwt init: WEZTERM_PANE is not set. Run inside a WezTerm pane." >&2
-    exit 1
-  fi
-  echo "$pane" > "$(ccwt_commander_file)"
-  echo "ccwt: commander pane = $pane"
-  echo "ccwt: state dir      = $state"
-}
-
 cmd_spawn() {
   local branch=${1:?usage: ccwt spawn <branch> [initial-task]}
   local task=${2:-}
-  local commander pane name commander_file toplevel worktree
-  commander_file=$(ccwt_commander_file)
-  if [[ ! -f $commander_file ]]; then
-    echo "ccwt spawn: run 'ccwt init' first." >&2
+  local commander pane name toplevel worktree
+  commander=${WEZTERM_PANE:-}
+  if [[ -z $commander ]]; then
+    echo "ccwt spawn: WEZTERM_PANE is not set. Run inside a WezTerm pane." >&2
     exit 1
   fi
-  commander=$(cat "$commander_file")
   name="ccwt-$(ccwt_sanitize "$branch")"
   toplevel=$(git rev-parse --show-toplevel)
+
+  mkdir -p "$(ccwt_state_dir)/panes"
 
   # Resolve host plugins from ~/.config/ccwt/config.toml.
   # Each plugin dir is passed to sbx as an extra :ro workspace and
@@ -200,7 +186,6 @@ cmd_help() {
 Usage: ccwt <command> [args...]
 
 Commands:
-  init                       Register the current WezTerm pane as commander.
   spawn <branch> [<task>]    Create a worktree + sandbox, start a worker.
   tell <branch> <message>    Send a message to a worker's REPL.
   logs <branch> [-n <lines>] Read the worker pane output (default: 200 lines).
@@ -231,7 +216,6 @@ main() {
   local cmd=${1:-help}
   shift || true
   case "$cmd" in
-    init)    cmd_init "$@" ;;
     spawn)   cmd_spawn "$@" ;;
     tell)    cmd_tell "$@" ;;
     logs)    cmd_logs "$@" ;;
