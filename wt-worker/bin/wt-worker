@@ -293,7 +293,10 @@ cmd_cleanup() {
   # Stop the background refresher first so it doesn't race against sbx rm.
   wt_worker_stop_refresher "$branch"
 
-  sbx rm "$name" 2>/dev/null || true
+  # --force: cleanup is non-interactive (also runs from scripts), so skip the
+  # confirmation prompt. Without it sbx rm hangs/aborts when stdin isn't a TTY,
+  # orphaning the sandbox while the worktree/branch/pane are already gone.
+  sbx rm --force "$name" 2>/dev/null || true
 
   # sbx rm is best-effort on worktree cleanup; remove explicitly if still present
   if [[ -d $worktree_dir ]]; then
