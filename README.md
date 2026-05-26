@@ -50,7 +50,10 @@ sbx secret set -g github
 GitHub App + 1Password で「その repo だけ・必要な permission だけ・1時間で失効」の token を mint:
 
 ```bash
-uv tool install git+https://github.com/td72/agent-gh-repo-token
+# install スクリプト (OS/arch 自動判定 → sha256 検証 → /usr/local/bin)
+curl -fsSL https://raw.githubusercontent.com/td72/agent-gh-repo-token/main/scripts/install.sh | sh
+# または: go install github.com/td72/agent-gh-repo-token@latest
+
 # セットアップ手順 (App 作成 → install → 1Password に保存 → repos.toml を書く)
 # は agent-gh-repo-token の README を参照
 ```
@@ -148,7 +151,7 @@ GitHub App 作成・1Password へのキー保管・`repos.toml` の書き方は
 を参照してください。
 
 wt-worker 側の挙動: spawn 時に `git remote get-url origin` から `host/owner/repo` を
-導出し、`agent-gh-repo-token --origin <それ>` を呼びます。stdout に token が返れば
+導出し、`agent-gh-repo-token --repo <それ>` を呼びます。stdout に token が返れば
 `sbx secret set <sandbox名> github` で sandbox 固有 secret として注入、失敗・skip した
 場合はグローバル secret 任せで spawn を続行します。
 

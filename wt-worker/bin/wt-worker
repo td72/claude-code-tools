@@ -51,14 +51,14 @@ wt_worker_origin_path() {
 # installed, wt-worker silently falls back to the global `github` secret
 # (if any).
 wt_worker_inject_github_secret() {
-  local sandbox=$1 origin=$2
+  local sandbox=$1 repo=$2
   local err_file token
   if ! command -v agent-gh-repo-token >/dev/null 2>&1; then
     # No-op: fall back to whatever global `github` secret the user set.
     return 0
   fi
   err_file=$(mktemp -t agent-gh-repo-token.XXXXXX)
-  if token=$(agent-gh-repo-token --origin "$origin" 2>"$err_file"); then
+  if token=$(agent-gh-repo-token --repo "$repo" 2>"$err_file"); then
     rm -f "$err_file"
     if [[ -n $token ]]; then
       printf '%s' "$token" | sbx secret set "$sandbox" github >/dev/null
@@ -252,12 +252,13 @@ Env:
 Auth:
   Anthropic:        sbx secret set -g anthropic         (global, once)
   GitHub (simple):  sbx secret set -g github            (global PAT fallback)
-  GitHub (scoped):  install agent-gh-repo-token, then
+  GitHub (scoped):  install agent-gh-repo-token, then write
                     ~/.config/agent-gh-repo-token/repos.toml
-    - if agent-gh-repo-token is on PATH and has a matching entry, spawn mints
-      a per-sandbox token scoped to the current repo + configured permissions
-      (expires in 1 hour) and stores it as the sandbox's `github` secret.
-    - see https://github.com/td72/agent-gh-repo-token
+    - if agent-gh-repo-token is on PATH and has a matching entry, spawn calls
+      it with --repo <host>/<owner>/<repo> and stores the resulting token as
+      the sandbox's `github` secret (scoped to this repo + configured
+      permissions, expires in 1 hour).
+    - install: see https://github.com/td72/agent-gh-repo-token
 
 Config:
   ~/.config/wt-worker/config.toml — [[marketplaces]] whose plugins are passed

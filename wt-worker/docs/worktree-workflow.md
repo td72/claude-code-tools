@@ -206,7 +206,7 @@ sbx secret set -g github   # fine-grained PAT を入力 (全 sandbox 共通)
 おくと、`wt-worker spawn` は:
 
 1. `git remote get-url origin` から `<host>/<owner>/<repo>` を導出
-2. `agent-gh-repo-token --origin <それ>` を呼び出し
+2. `agent-gh-repo-token --repo <それ>` を呼び出し
 3. 成功すれば stdout の token を `sbx secret set <sandbox名> github` に流す
 4. 失敗・未インストールはグローバル `-g github` の secret に fallback
 
@@ -218,7 +218,8 @@ README を参照。
 インストール:
 
 ```bash
-uv tool install git+https://github.com/td72/agent-gh-repo-token
+curl -fsSL https://raw.githubusercontent.com/td72/agent-gh-repo-token/main/scripts/install.sh | sh
+# または: go install github.com/td72/agent-gh-repo-token@latest
 ```
 
 ## オープン課題
