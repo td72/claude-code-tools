@@ -9,7 +9,10 @@ wt_worker_state_dir() {
   echo "${XDG_STATE_HOME:-$HOME/.local/state}/wt-worker/${repo}"
 }
 
-wt_worker_pane_file() { echo "$(wt_worker_state_dir)/panes/$(wt_worker_sanitize "$1")"; }
+wt_worker_pane_file()      { echo "$(wt_worker_state_dir)/panes/$(wt_worker_sanitize "$1")"; }
+wt_worker_repo_file()      { echo "$(wt_worker_state_dir)/repos/$(wt_worker_sanitize "$1")"; }
+wt_worker_refresher_pid()  { echo "$(wt_worker_state_dir)/refreshers/$(wt_worker_sanitize "$1").pid"; }
+wt_worker_refresher_log()  { echo "$(wt_worker_state_dir)/refreshers/$(wt_worker_sanitize "$1").log"; }
 
 wt_worker_sanitize() {
   # branch -> safe identifier for sbx name + filename
@@ -51,7 +54,7 @@ wt_worker_origin_path() {
 # installed, wt-worker silently falls back to the global `github` secret
 # (if any).
 wt_worker_inject_github_secret() {
-  local sandbox=$1 repo=$2
+  local sandbox=$1 repo=$2 caller=${3:-spawn}
   local err_file token
   if ! command -v agent-gh-repo-token >/dev/null 2>&1; then
     # No-op: fall back to whatever global `github` secret the user set.
@@ -62,12 +65,62 @@ wt_worker_inject_github_secret() {
     rm -f "$err_file"
     if [[ -n $token ]]; then
       printf '%s' "$token" | sbx secret set "$sandbox" github >/dev/null
-      echo "wt-worker spawn: scoped github token stored on sandbox=$sandbox" >&2
+      echo "wt-worker $caller: scoped github token stored on sandbox=$sandbox" >&2
+      return 0
     fi
   else
-    echo "wt-worker spawn: skipping github auth ($(cat "$err_file"))" >&2
+    echo "wt-worker $caller: github auth failed ($(cat "$err_file"))" >&2
     rm -f "$err_file"
   fi
+  return 1
+}
+
+# Background refresher: periodically re-mint the sandbox's scoped GitHub token
+# so workers that run longer than the 1-hour installation-token TTL keep working.
+# Runs until the sandbox is removed (cleanup) or the process is killed.
+wt_worker_refresh_loop() {
+  local sandbox=$1 repo=$2
+  local interval=${WT_WORKER_REFRESH_INTERVAL:-3000}  # 50 minutes (10 min margin)
+  echo "[$(date +'%F %T')] refresher started (interval=${interval}s)"
+  while sbx secret ls "$sandbox" >/dev/null 2>&1; do
+    sleep "$interval"
+    sbx secret ls "$sandbox" >/dev/null 2>&1 || break
+    if wt_worker_inject_github_secret "$sandbox" "$repo" refresh; then
+      echo "[$(date +'%F %T')] refreshed $sandbox"
+    else
+      echo "[$(date +'%F %T')] refresh failed for $sandbox (will retry next cycle)"
+    fi
+  done
+  echo "[$(date +'%F %T')] sandbox $sandbox gone, refresher exiting"
+}
+
+# Detach the refresh loop as a background process. Survives terminal close via
+# nohup; PID is recorded so cleanup can kill it explicitly.
+wt_worker_start_refresher() {
+  local branch=$1 sandbox=$2 repo=$3
+  command -v agent-gh-repo-token >/dev/null 2>&1 || return 0
+  local pid_file log_file
+  pid_file=$(wt_worker_refresher_pid "$branch")
+  log_file=$(wt_worker_refresher_log "$branch")
+  mkdir -p "$(dirname "$pid_file")"
+  # Re-exec self with the hidden subcommand so the loop is a separate process.
+  nohup "${BASH_SOURCE[0]}" _refresh-loop "$sandbox" "$repo" \
+    >>"$log_file" 2>&1 </dev/null &
+  echo $! >"$pid_file"
+  disown
+  echo "wt-worker spawn: background refresher pid=$! log=$log_file" >&2
+}
+
+wt_worker_stop_refresher() {
+  local branch=$1
+  local pid_file pid
+  pid_file=$(wt_worker_refresher_pid "$branch")
+  [[ -f $pid_file ]] || return 0
+  pid=$(cat "$pid_file")
+  if [[ -n $pid ]] && kill "$pid" 2>/dev/null; then
+    echo "wt-worker cleanup: stopped refresher pid=$pid" >&2
+  fi
+  rm -f "$pid_file"
 }
 
 # Emit one "<marketplace>/<plugin>" line per entry in config.toml.
@@ -107,7 +160,7 @@ cmd_spawn() {
   name="wt-worker-$(wt_worker_sanitize "$branch")"
   toplevel=$(git rev-parse --show-toplevel)
 
-  mkdir -p "$(wt_worker_state_dir)/panes"
+  mkdir -p "$(wt_worker_state_dir)/panes" "$(wt_worker_state_dir)/repos"
 
   # Resolve host plugins from ~/.config/wt-worker/config.toml.
   local extra_workspaces=() plugin_dirs=()
@@ -132,10 +185,14 @@ cmd_spawn() {
 
   # Mint a scoped GitHub App installation token for this sandbox (best-effort).
   # Must run AFTER sbx create (sandbox name must exist) and BEFORE sbx run
-  # (the proxy reads secrets at run time).
+  # (the proxy reads secrets at run time). Also persist the repo so cmd_refresh
+  # and the background refresher can re-mint without re-deriving from cwd.
   local origin
   if origin=$(wt_worker_origin_path); then
-    wt_worker_inject_github_secret "$name" "$origin"
+    echo "$origin" >"$(wt_worker_repo_file "$branch")"
+    if wt_worker_inject_github_secret "$name" "$origin"; then
+      wt_worker_start_refresher "$branch" "$name" "$origin"
+    fi
   else
     echo "wt-worker spawn: no 'origin' remote, skipping github auth" >&2
   fi
@@ -207,13 +264,34 @@ cmd_list() {
   sbx ls || true
 }
 
+cmd_refresh() {
+  local branch=${1:?usage: wt-worker refresh <branch>}
+  local name repo repo_file
+  name="wt-worker-$(wt_worker_sanitize "$branch")"
+  repo_file=$(wt_worker_repo_file "$branch")
+  if [[ ! -f $repo_file ]]; then
+    echo "wt-worker refresh: no recorded repo for '$branch' (was spawn run?)" >&2
+    exit 1
+  fi
+  repo=$(cat "$repo_file")
+  if ! sbx secret ls "$name" >/dev/null 2>&1; then
+    echo "wt-worker refresh: sandbox '$name' is gone" >&2
+    exit 1
+  fi
+  wt_worker_inject_github_secret "$name" "$repo" refresh
+}
+
 cmd_cleanup() {
   local branch=${1:?usage: wt-worker cleanup <branch>}
-  local name pane pane_file toplevel worktree_dir
+  local name pane pane_file repo_file toplevel worktree_dir
   name="wt-worker-$(wt_worker_sanitize "$branch")"
   pane_file=$(wt_worker_pane_file "$branch")
+  repo_file=$(wt_worker_repo_file "$branch")
   toplevel=$(git rev-parse --show-toplevel)
   worktree_dir="$toplevel/.sbx/$name-worktrees"
+
+  # Stop the background refresher first so it doesn't race against sbx rm.
+  wt_worker_stop_refresher "$branch"
 
   sbx rm "$name" 2>/dev/null || true
 
@@ -229,6 +307,7 @@ cmd_cleanup() {
     wezterm cli kill-pane --pane-id "$pane" 2>/dev/null || true
     rm -f "$pane_file"
   fi
+  rm -f "$repo_file"
 
   echo "wt-worker: removed sandbox '$name' and killed pane."
 }
@@ -239,15 +318,20 @@ Usage: wt-worker <command> [args...]
 
 Commands:
   spawn <branch> [<task>]    Create a worktree + sandbox, start a worker.
+                             Also starts a background refresher that re-mints
+                             the GitHub token every 50 min (best-effort).
   tell <branch> <message>    Send a message to a worker's REPL.
   logs <branch> [-n <lines>] Read the worker pane output (default: 200 lines).
   list                       List active sandboxes (sbx ls).
-  cleanup <branch>           Remove sandbox and kill pane.
+  refresh <branch>           Manually re-mint the worker's scoped GitHub token
+                             (normally automatic; useful if refresher died).
+  cleanup <branch>           Remove sandbox, kill pane, stop refresher.
   help                       Show this help.
 
 Env:
-  WT_WORKER_SPAWN_WAIT  Seconds to wait before sending the initial task (default: 5)
-  XDG_CONFIG_HOME       Used to locate config.toml (default: ~/.config)
+  WT_WORKER_SPAWN_WAIT       Seconds to wait before sending the initial task (default: 5)
+  WT_WORKER_REFRESH_INTERVAL Seconds between background token refreshes (default: 3000)
+  XDG_CONFIG_HOME            Used to locate config.toml (default: ~/.config)
 
 Auth:
   Anthropic:        sbx secret set -g anthropic         (global, once)
@@ -275,11 +359,14 @@ main() {
   local cmd=${1:-help}
   shift || true
   case "$cmd" in
-    spawn)   cmd_spawn "$@" ;;
-    tell)    cmd_tell "$@" ;;
-    logs)    cmd_logs "$@" ;;
-    list)    cmd_list "$@" ;;
-    cleanup) cmd_cleanup "$@" ;;
+    spawn)         cmd_spawn "$@" ;;
+    tell)          cmd_tell "$@" ;;
+    logs)          cmd_logs "$@" ;;
+    list)          cmd_list "$@" ;;
+    refresh)       cmd_refresh "$@" ;;
+    cleanup)       cmd_cleanup "$@" ;;
+    # Hidden: re-exec target for the background refresher (spawn auto-starts it).
+    _refresh-loop) wt_worker_refresh_loop "$@" ;;
     help|-h|--help) cmd_help ;;
     *) echo "wt-worker: unknown command '$cmd'" >&2; cmd_help; exit 2 ;;
   esac

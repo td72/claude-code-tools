@@ -155,6 +155,10 @@ wt-worker 側の挙動: spawn 時に `git remote get-url origin` から `host/ow
 `sbx secret set <sandbox名> github` で sandbox 固有 secret として注入、失敗・skip した
 場合はグローバル secret 任せで spawn を続行します。
 
+token は 1 時間で失効するため、spawn と同時に background refresher を `nohup` で
+起動し、50 分ごとに再 mint して上書きします (ターミナルを閉じても生存)。
+`wt-worker cleanup` 時に SIGTERM で停止、`wt-worker refresh <branch>` で手動再 mint も可能。
+
 ### 開発 (mise tasks)
 
 ```bash

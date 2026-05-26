@@ -59,7 +59,9 @@
                                                     #  (sbx --branch が自動生成)
 
 ~/.local/state/wt-worker/<repo>/                    # 司令塔のローカル状態 (XDG 準拠)
-  └─ panes/<branch>                                 # branch ごとの WezTerm pane-id
+  ├─ panes/<branch>                                 # branch ごとの WezTerm pane-id
+  ├─ repos/<branch>                                 # branch → host/owner/repo の memo (refresh 用)
+  └─ refreshers/<branch>.{pid,log}                  # background refresher の PID とログ
 ```
 
 ## 前提ツール
@@ -118,18 +120,39 @@ wt-worker logs <branch> [-n <lines>]
 - **git 監視**: 新しい commit が来たら「実装は進んだ」とみなす
 - **人間判断**: 最終確認は人間が pane を見て行う
 
-### 5. Cleanup
+### 5. Token refresh (自動 / 手動)
+
+`agent-gh-repo-token` を使った scoped token は **1 時間で失効**するため、
+`wt-worker spawn` は同時に背景プロセス (refresher) を `nohup` で起動します:
+
+- 50 分ごとに `agent-gh-repo-token --repo <...>` を再実行し、新 token を
+  `sbx secret set <sandbox> github` で上書き
+- `sbx secret ls <sandbox>` で sandbox の生存を確認、消えていたら自己終了
+- ログ: `~/.local/state/wt-worker/<repo>/refreshers/<branch>.log`
+- PID: `~/.local/state/wt-worker/<repo>/refreshers/<branch>.pid`
+
+ターミナルを閉じても `nohup` で生き残ります (ただしホスト再起動は越えない)。
+何らかの理由で refresher が死んだ・再起動後すぐ更新したい場合は手動で:
+
+```bash
+wt-worker refresh <branch>   # 一度だけ再 mint して secret を上書き
+```
+
+interval は `WT_WORKER_REFRESH_INTERVAL` (秒) で変更可能 (デフォルト 3000)。
+
+### 6. Cleanup
 
 ```bash
 wt-worker cleanup <branch>
 ```
 
-1. `sbx rm <sandbox名>` でサンドボックスを削除
-2. `git worktree remove --force` + `rmdir` で `.sbx/` 下のディレクトリを掃除
-3. `git branch -D <branch>` でブランチも削除
-4. `wezterm cli kill-pane` で pane を削除し pane-id ファイルを削除
+1. **refresher プロセスに SIGTERM** (race 防止のため最初)
+2. `sbx rm <sandbox名>` でサンドボックスを削除
+3. `git worktree remove --force` + `rmdir` で `.sbx/` 下のディレクトリを掃除
+4. `git branch -D <branch>` でブランチも削除
+5. `wezterm cli kill-pane` で pane を削除し pane-id / repo / pid ファイルを削除
 
-### 6. その他
+### 7. その他
 
 | コマンド | 用途 |
 |---|---|
@@ -208,7 +231,12 @@ sbx secret set -g github   # fine-grained PAT を入力 (全 sandbox 共通)
 1. `git remote get-url origin` から `<host>/<owner>/<repo>` を導出
 2. `agent-gh-repo-token --repo <それ>` を呼び出し
 3. 成功すれば stdout の token を `sbx secret set <sandbox名> github` に流す
-4. 失敗・未インストールはグローバル `-g github` の secret に fallback
+4. **background refresher を `nohup` で起動** (50 分ごとに 2〜3 を繰り返す)
+5. 失敗・未インストールはグローバル `-g github` の secret に fallback
+
+token は GitHub App 仕様で 1 時間で失効するため、`spawn` と同時に背景プロセスが
+立ち上がり worker が稼働中はずっと自動で更新されます。`wt-worker cleanup` 時に
+SIGTERM で停止。手動で再 mint したいときは `wt-worker refresh <branch>`。
 
 `agent-gh-repo-token` 自体は GitHub App + 1Password に基づき
 「**現在の repo の・指定 permission だけ・1時間で失効する**」installation token を
