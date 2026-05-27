@@ -70,8 +70,8 @@
 |---|---|---|
 | `wezterm` (cli) | pane の split / send-text / get-text | 必須 |
 | `sbx` | sandbox 作成 / 認証 / `--branch` で worktree 作成 | 必須 |
-| `uv` | `wt-worker-gh-token` の inline-deps 解決 | GitHub App 使用時 |
-| `op` (1Password CLI) | App private key 等の引き出し | GitHub App 使用時 |
+| [`agent-gh-repo-token`](https://github.com/td72/agent-gh-repo-token) | per-repo の scoped GitHub token を mint | GitHub App 使用時 |
+| `op` (1Password CLI) | App private key 等の引き出し (agent-gh-repo-token が使用) | GitHub App 使用時 |
 
 ## ライフサイクル
 
@@ -86,7 +86,7 @@ wt-worker spawn <branch> ["<initial-task>"]
 1. `$WEZTERM_PANE` を司令塔の pane-id として記録
 2. `sbx create --branch=<branch> --name wt-worker-<branch> claude <toplevel> [plugin_dirs:ro...]`
    - sbx が worktree を `<toplevel>/.sbx/<sandbox名>-worktrees/<branch>/` に作る
-3. `~/.config/wt-worker/repos.toml` があれば GitHub App token を mint し、
+3. `~/.config/agent-gh-repo-token/repos.toml` があれば GitHub App token を mint し、
    `sbx secret set <sandbox名> github` で sandbox 固有 secret として注入 (best-effort)
 4. `wezterm cli split-pane --bottom --percent 30` で司令塔の下に pane を追加し、pane-id を保存
 5. pane 内で `sbx run <sandbox名> [-- --plugin-dir ...]` を実行して REPL に入る
@@ -214,7 +214,7 @@ sbx プロキシが API 認証を透過的に処理するため、worker 内に 
 ### Anthropic
 
 ```bash
-sbx secret set anthropic   # ホストで 1 回だけ
+sbx secret set -g anthropic   # ホストで 1 回だけ (global)
 ```
 
 ### GitHub (シンプル)

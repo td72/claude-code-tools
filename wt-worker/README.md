@@ -19,8 +19,8 @@
 ## 初回セットアップ
 
 ```bash
-# Anthropic 認証 (1 回だけ)
-sbx secret set anthropic
+# Anthropic 認証 (1 回だけ、global)
+sbx secret set -g anthropic
 ```
 
 GitHub 認証は 2 通りから選べます。
