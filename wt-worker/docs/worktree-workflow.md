@@ -19,7 +19,7 @@
 ```
 +-------------------- WezTerm Window --------------------+
 |  司令塔 claude (host)                                  |
-|  $ ccwt spawn feature-x "<initial task>"               |
+|  $ wt-worker spawn feature-x "<initial task>"          |
 +--------------------------------------------------------+
 |  worker A (sbx sandbox → claude REPL, branch=feature-x)|
 |  > implement ...                                       |
@@ -32,14 +32,14 @@
 ### 司令塔 (Commander)
 
 - ホスト OS 上の claude code セッション
-- `ccwt` CLI を叩いて worker のライフサイクルを管理
+- `wt-worker` CLI を叩いて worker のライフサイクルを管理
 - worker pane を `wezterm cli get-text` で覗き、`wezterm cli send-text` で追加指示を投入
-- worker のブランチをレビュー・マージ
+- worker のブランチをレビュー・マージ・PR 化
 
 ### Worker
 
 - Docker Sandboxes (sbx) 上で動く claude REPL（対話モード）
-- worktree ディレクトリだけがマウントされ、他リポジトリやホスト全体には触れない
+- ホスト OS には触れない (sbx の隔離境界内で動作)
 - 出力は wezterm pane に流れ、人間と司令塔の双方が観察できる
 
 ### 通信
@@ -47,89 +47,116 @@
 | 方向 | 手段 |
 |---|---|
 | 司令塔 → worker | `wezterm cli send-text --pane-id <id>` で REPL に投入 |
-| worker → 司令塔 | git commit / branch（pull 経由で間接的に伝達） |
-| 完了の伝達 | 司令塔が pane を `get-text` で覗いて判断、または人間が口頭で司令塔に伝える |
+| worker → 司令塔 | git commit / branch / PR (pull 経由で間接的に伝達) |
+| 完了の伝達 | 司令塔が pane を `get-text` で覗いて判断、または人間が確認 |
 
 ## ディレクトリレイアウト
 
 ```
-~/src/github.com/td72/<repo>/         # 司令塔が動く本体
-~/worktrees/github.com/td72/<repo>/   # gwq が管理する worktree 群
-  ├─ feature-x/                        # worker A の作業空間
-  └─ feature-y/                        # worker B の作業空間
+~/src/github.com/td72/<repo>/                       # 司令塔が動く本体
+  └─ .sbx/                                          # sbx が管理 (gitignore 推奨)
+       └─ wt-worker-<branch>-worktrees/<branch>/    # worker A の作業空間
+                                                    #  (sbx --branch が自動生成)
 
-~/.local/state/ccwt/<repo>/           # 司令塔のローカル状態 (XDG 準拠)
-  ├─ commander                         # 司令塔自身の pane-id
-  └─ panes/<branch>                    # branch ごとの WezTerm pane-id
+~/.local/state/wt-worker/<repo>/                    # 司令塔のローカル状態 (XDG 準拠)
+  ├─ panes/<branch>                                 # branch ごとの WezTerm pane-id
+  ├─ repos/<branch>                                 # branch → host/owner/repo の memo (refresh 用)
+  └─ refreshers/<branch>.{pid,log}                  # background refresher の PID とログ
 ```
 
 ## 前提ツール
 
-| ツール | 用途 | 入手 |
+| ツール | 用途 | 必須? |
 |---|---|---|
-| `gwq` | worktree の add / list / get / remove | `mise.toml` の `[tools]` |
-| `wezterm` (cli) | pane の split / send-text / get-text | ホストに既存 |
-| `sbx` | Docker Sandboxes CLI (sandbox 作成・認証・ライフサイクル) | ホストに既存 |
+| `wezterm` (cli) | pane の split / send-text / get-text | 必須 |
+| `sbx` | sandbox 作成 / 認証 / `--branch` で worktree 作成 | 必須 |
+| [`agent-gh-repo-token`](https://github.com/td72/agent-gh-repo-token) | per-repo の scoped GitHub token を mint | GitHub App 使用時 |
+| `op` (1Password CLI) | App private key 等の引き出し (agent-gh-repo-token が使用) | GitHub App 使用時 |
 
 ## ライフサイクル
-
-### 0. Init
-
-```bash
-ccwt init
-```
-
-- 現在の WezTerm pane-id (`$WEZTERM_PANE`) を `~/.local/state/ccwt/<repo>/commander` に保存
 
 ### 1. Spawn
 
 ```bash
-ccwt spawn <branch> ["<initial-task>"]
+wt-worker spawn <branch> ["<initial-task>"]
 ```
 
 実行手順:
 
-1. `gwq add [-b] <branch>` で worktree を作成（パスは `~/worktrees/github.com/<owner>/<repo>/<branch>/`）
-2. `sbx create --name ccwt-<branch> claude <worktree> [plugin_dirs:ro...]` でサンドボックスを作成
-3. `wezterm cli split-pane --bottom` で司令塔の下に pane を追加し、pane-id を保存
-4. pane 内で `sbx run ccwt-<branch> [-- --plugin-dir ...]` を実行して REPL に入る
-5. `<initial-task>` が指定されていれば、続けて pane に送信
+1. `$WEZTERM_PANE` を司令塔の pane-id として記録
+2. `sbx create --branch=<branch> --name wt-worker-<branch> claude <toplevel> [plugin_dirs:ro...]`
+   - sbx が worktree を `<toplevel>/.sbx/<sandbox名>-worktrees/<branch>/` に作る
+3. `~/.config/agent-gh-repo-token/repos.toml` があれば GitHub App token を mint し、
+   `sbx secret set <sandbox名> github` で sandbox 固有 secret として注入 (best-effort)
+4. `wezterm cli split-pane --bottom --percent 30` で司令塔の下に pane を追加し、pane-id を保存
+5. pane 内で `sbx run <sandbox名> [-- --plugin-dir ...]` を実行して REPL に入る
+6. `<initial-task>` が指定されていれば、`sleep` 後にその文字列を pane に送信
 
-認証は sbx プロキシが透過的に処理します（`sbx secret set anthropic` で事前設定）。
+認証は sbx プロキシが透過的に処理します (詳細は下「認証」セクション)。
 
 ### 2. 追加指示
 
 ```bash
-ccwt tell <branch> "<message>"
+wt-worker tell <branch> "<message>"
 ```
 
-- `~/.local/state/ccwt/<repo>/panes/<branch>` から pane-id を読み出し
+- `~/.local/state/wt-worker/<repo>/panes/<branch>` から pane-id を読み出し
 - `wezterm cli send-text --pane-id <id> "<message>"` で投入
 - claude REPL は Enter で送信されるため、末尾に CR を別送する
 
-### 3. 完了検知
+### 3. 出力の覗き見
+
+```bash
+wt-worker logs <branch> [-n <lines>]
+```
+
+`wezterm cli get-text --pane-id <id> --start-line -<lines>` で末尾を読む (デフォルト 200 行)。
+
+### 4. 完了検知
 
 対話モードでは「タスクが終わった」を機械的に判定する確実な方法がない。シンプルに以下のみで運用:
 
-- **pane 観察**: 司令塔が必要に応じて `wezterm cli get-text --pane-id <id> --start-line -200` で末尾を読む
+- **pane 観察**: 司令塔が必要に応じて `wt-worker logs` で末尾を読む (Claude Code が `✻ Worked for ...` を出した時点で 1 ターンが終わったサイン)
+- **git 監視**: 新しい commit が来たら「実装は進んだ」とみなす
 - **人間判断**: 最終確認は人間が pane を見て行う
 
-### 4. Cleanup
+### 5. Token refresh (自動 / 手動)
+
+`agent-gh-repo-token` を使った scoped token は **1 時間で失効**するため、
+`wt-worker spawn` は同時に背景プロセス (refresher) を `nohup` で起動します:
+
+- 50 分ごとに `agent-gh-repo-token --repo <...>` を再実行し、新 token を
+  `sbx secret set <sandbox> github` で上書き
+- `sbx secret ls <sandbox>` で sandbox の生存を確認、消えていたら自己終了
+- ログ: `~/.local/state/wt-worker/<repo>/refreshers/<branch>.log`
+- PID: `~/.local/state/wt-worker/<repo>/refreshers/<branch>.pid`
+
+ターミナルを閉じても `nohup` で生き残ります (ただしホスト再起動は越えない)。
+何らかの理由で refresher が死んだ・再起動後すぐ更新したい場合は手動で:
 
 ```bash
-ccwt cleanup <branch>
+wt-worker refresh <branch>   # 一度だけ再 mint して secret を上書き
 ```
 
-1. `sbx rm ccwt-<branch>` でサンドボックスを削除
-2. `wezterm cli kill-pane --pane-id <id>` で pane を削除
-3. pane-id ファイルを削除
-4. `gwq remove <branch>` は手動（未コミット変更があれば人間が判断）
+interval は `WT_WORKER_REFRESH_INTERVAL` (秒) で変更可能 (デフォルト 3000)。
 
-### 5. その他コマンド
+### 6. Cleanup
+
+```bash
+wt-worker cleanup <branch>
+```
+
+1. **refresher プロセスに SIGTERM** (race 防止のため最初)
+2. `sbx rm <sandbox名>` でサンドボックスを削除
+3. `git worktree remove --force` + `rmdir` で `.sbx/` 下のディレクトリを掃除
+4. `git branch -D <branch>` でブランチも削除
+5. `wezterm cli kill-pane` で pane を削除し pane-id / repo / pid ファイルを削除
+
+### 7. その他
 
 | コマンド | 用途 |
 |---|---|
-| `ccwt list` | `sbx ls` + `gwq list` で起動中の sandbox と worktree を表示 |
+| `wt-worker list` | `sbx ls` で起動中の sandbox を表示 |
 
 ## WezTerm 連携の詳細
 
@@ -138,7 +165,7 @@ ccwt cleanup <branch>
 ```bash
 PANE_ID=$(wezterm cli split-pane \
   --bottom --percent 30 \
-  --pane-id "$(cat ~/.local/state/ccwt/<repo>/commander)" \
+  --pane-id "$WEZTERM_PANE" \
   --cwd "$WORKTREE_PATH")
 ```
 
@@ -157,12 +184,13 @@ wezterm cli get-text --pane-id "$PANE_ID" --start-line -200
 
 ## worker への plugin 引き継ぎ
 
-`~/.config/ccwt/config.toml` に列挙した plugin を、`ccwt spawn` 時に sbx の追加 workspace として read-only マウントし `claude --plugin-dir` で渡します。
+`~/.config/wt-worker/config.toml` に列挙した plugin を、`wt-worker spawn` 時に
+sbx の追加 workspace として read-only マウントし `claude --plugin-dir` で渡します。
 
 ```toml
 [[marketplaces]]
-name    = "kiconia-plugins"
-plugins = ["mise", "uv"]
+name    = "td72"
+plugins = ["wt-worker"]
 
 [[marketplaces]]
 name    = "claude-plugins-official"
@@ -181,23 +209,57 @@ config 不在、`yq`/`jq` 不在、plugin 未インストール — いずれも
 
 ## 認証
 
-sbx プロキシが API 認証を透過的に処理するため、worker に認証情報を手動で渡す必要はありません。
+sbx プロキシが API 認証を透過的に処理するため、worker 内に token は露出しません。
+
+### Anthropic
 
 ```bash
-# ホストで 1 回だけ設定
-sbx secret set anthropic
+sbx secret set -g anthropic   # ホストで 1 回だけ (global)
 ```
 
-worker 内の claude が Anthropic API を呼ぶと、sbx プロキシが自動で認証を注入します。rate limit はホストと worker で共有プールになります。
+### GitHub (シンプル)
+
+```bash
+sbx secret set -g github   # fine-grained PAT を入力 (全 sandbox 共通)
+```
+
+### GitHub (推奨: per-repo 最小権限)
+
+[`agent-gh-repo-token`](https://github.com/td72/agent-gh-repo-token) をホストに入れて
+おくと、`wt-worker spawn` は:
+
+1. `git remote get-url origin` から `<host>/<owner>/<repo>` を導出
+2. `agent-gh-repo-token --repo <それ>` を呼び出し
+3. 成功すれば stdout の token を `sbx secret set <sandbox名> github` に流す
+4. **background refresher を `nohup` で起動** (50 分ごとに 2〜3 を繰り返す)
+5. 失敗・未インストールはグローバル `-g github` の secret に fallback
+
+token は GitHub App 仕様で 1 時間で失効するため、`spawn` と同時に背景プロセスが
+立ち上がり worker が稼働中はずっと自動で更新されます。`wt-worker cleanup` 時に
+SIGTERM で停止。手動で再 mint したいときは `wt-worker refresh <branch>`。
+
+`agent-gh-repo-token` 自体は GitHub App + 1Password に基づき
+「**現在の repo の・指定 permission だけ・1時間で失効する**」installation token を
+mint します。詳細 (App 作成手順・`repos.toml` の書き方・解決規則) は同ツールの
+README を参照。
+
+インストール:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/td72/agent-gh-repo-token/main/scripts/install.sh | sh
+# または: go install github.com/td72/agent-gh-repo-token@latest
+```
 
 ## オープン課題
 
 1. **pane が増えすぎた場合**: 一定数を超えたら自動で tab に切り替える等の拡張は将来検討
-2. **依存関係のある worker**: worker B が worker A の成果物に依存するケースは MVP のスコープ外（人間が `git merge` してから B を spawn）
+2. **依存関係のある worker**: worker B が worker A の成果物に依存するケースは MVP のスコープ外 (人間が `git merge` してから B を spawn)
+3. **完了の自動検知**: `✻ Worked for` パターン or git commit 監視で `wt-worker wait <branch>` を実装する余地あり
 
 ## 関連
 
 - `mise.toml`: ツールチェイン管理
-- gwq: <https://github.com/d-kuro/gwq>
 - Docker Sandboxes: <https://docs.docker.com/ai/gordon/docker-sandboxes/>
 - WezTerm CLI: <https://wezfurlong.org/wezterm/cli/general.html>
+- GitHub Apps: <https://docs.github.com/en/apps/creating-github-apps>
+- 1Password CLI: <https://developer.1password.com/docs/cli/>
