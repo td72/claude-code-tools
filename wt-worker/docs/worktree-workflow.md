@@ -263,3 +263,5 @@ curl -fsSL https://raw.githubusercontent.com/td72/agent-gh-repo-token/main/scrip
 - WezTerm CLI: <https://wezfurlong.org/wezterm/cli/general.html>
 - GitHub Apps: <https://docs.github.com/en/apps/creating-github-apps>
 - 1Password CLI: <https://developer.1password.com/docs/cli/>
+
+<!-- parallel test B -->
