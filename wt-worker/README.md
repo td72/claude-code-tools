@@ -161,3 +161,5 @@ mise run wt-worker:ci      # lint + build (CI 用)
 ## ライセンス
 
 MIT — リポジトリルートの [LICENSE](../LICENSE) を参照。
+
+<!-- parallel test A -->
