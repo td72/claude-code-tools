@@ -75,6 +75,25 @@ wt_worker_inject_github_secret() {
   return 1
 }
 
+# Pre-authenticate `gh` inside the sandbox so workers can `gh pr create` directly
+# instead of discovering gh is unauthenticated and falling back to raw REST calls.
+# We drop a hosts.yml whose oauth_token is a sentinel; the sbx proxy overwrites
+# the Authorization header on github.com with the real per-sandbox `github`
+# secret, so gh only needs to believe it is logged in. Done at runtime (a plain
+# file) rather than via the image or a kit, both of which break other sbx
+# integrations (see cmd_spawn). git push works through the proxy regardless.
+# Best-effort: a failure just means the worker must use the REST API for PRs.
+wt_worker_configure_gh() {
+  local sandbox=$1
+  if sbx exec "$sandbox" -- bash -lc \
+      'mkdir -p ~/.config/gh && printf "github.com:\n    oauth_token: proxy-managed\n    git_protocol: https\n" > ~/.config/gh/hosts.yml' \
+      >/dev/null 2>&1; then
+    echo "wt-worker spawn: pre-authenticated gh on sandbox=$sandbox" >&2
+  else
+    echo "wt-worker spawn: could not pre-configure gh (worker can still use the REST API)" >&2
+  fi
+}
+
 # Background refresher: periodically re-mint the sandbox's scoped GitHub token
 # so workers that run longer than the 1-hour installation-token TTL keep working.
 # Runs until the sandbox is removed (cleanup) or the process is killed.
@@ -177,7 +196,12 @@ cmd_spawn() {
     plugin_dirs+=("$host_dir")
   done < <(wt_worker_read_plugins)
 
-  # Create sandbox + worktree via sbx. Auth handled by sbx proxy.
+  # Create sandbox + worktree via sbx using the STOCK claude image. Auth is
+  # handled by the sbx proxy. We deliberately pass neither --template nor --kit:
+  # a custom --template image loses sbx's transparent git-push credential
+  # injection (push fails with "could not read Username"), and a --kit resets the
+  # agent's Anthropic credential wiring (worker REPL shows "Not logged in"). gh
+  # is instead pre-authenticated at runtime, below, with a plain config file.
   # Worktree lands at <toplevel>/.sbx/<name>-worktrees/<branch-sanitized>/
   sbx create --branch="$branch" --name "$name" --quiet \
     claude "$toplevel" \
@@ -191,6 +215,7 @@ cmd_spawn() {
   if origin=$(wt_worker_origin_path); then
     echo "$origin" >"$(wt_worker_repo_file "$branch")"
     if wt_worker_inject_github_secret "$name" "$origin"; then
+      wt_worker_configure_gh "$name"
       wt_worker_start_refresher "$branch" "$name" "$origin"
     fi
   else
