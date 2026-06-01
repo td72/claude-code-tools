@@ -152,7 +152,36 @@ wt-worker cleanup <branch>
 4. `git branch -D <branch>` でブランチも削除
 5. `wezterm cli kill-pane` で pane を削除し pane-id / repo / pid ファイルを削除
 
-### 7. その他
+### 7. Verify (CI パリティのテスト実行)
+
+```bash
+wt-worker verify <branch>
+```
+
+worker サンドボックスは**ホストの worktree を direct mount** するため、その
+`node_modules` は **ホスト OS (macOS) 向けのネイティブバイナリ**を含む。
+vite-plus / rolldown / oxc / esbuild などネイティブ binding を持つツールや
+Playwright のブラウザバイナリは Linux コンテナでロード・実行できず、`vp build`・
+e2e の webServer・ブラウザがことごとく落ちる。つまり **e2e はワーカー内で検証
+できない**（push して CI を見るまで結果が分からない盲目ループになる）。
+
+`verify` はこれを回避する。**司令塔側**で、dev サンドボックスとは別の
+クリーンな Linux コンテナを立て、CI と同じ条件でテストを回す:
+
+1. `git archive <branch>` で**コミット済み**ブランチツリーを export
+   （`node_modules` / `target` を含まない）してコンテナに流し込む
+2. `~/.config/wt-worker/config.toml` の `[verify].command` をコンテナ内で実行
+   （例: `mise install && pnpm install --frozen-lockfile && pnpm exec playwright install --with-deps && mise run web:e2e`）
+3. コンテナの **exit code がそのまま結果** (0 = pass, 非0 = fail)
+4. `[verify].caches` のパスは per-repo の named volume として永続化され、
+   pnpm store / cargo / playwright ブラウザの再インストールを高速化
+
+コンテナは非 root の stock イメージでも書き込めるよう `--user root`
+（`HOME=/home/agent` で mise のシムを解決）で実行する。`command` 未設定なら
+`verify` はヒントを出して終了する。`verify` はコミット済み HEAD を対象とするため、
+**先にコミットしてから**呼ぶ。
+
+### 8. その他
 
 | コマンド | 用途 |
 |---|---|
@@ -255,6 +284,11 @@ curl -fsSL https://raw.githubusercontent.com/td72/agent-gh-repo-token/main/scrip
 1. **pane が増えすぎた場合**: 一定数を超えたら自動で tab に切り替える等の拡張は将来検討
 2. **依存関係のある worker**: worker B が worker A の成果物に依存するケースは MVP のスコープ外 (人間が `git merge` してから B を spawn)
 3. **完了の自動検知**: `✻ Worked for` パターン or git commit 監視で `wt-worker wait <branch>` を実装する余地あり
+4. **ワーカー内での e2e 検証**: 現状 `wt-worker verify` は司令塔側のクリーンコンテナで回す
+   (上記「7. Verify」)。ワーカー自身が e2e を回せるようにするには、dev サンドボックスの
+   `node_modules` を direct mount から外してコンテナローカルの volume にし、spawn 時に
+   install + ネイティブ rebuild する「自己完結モード」(`spawn --heavy` 等) が必要。投資が
+   大きいので当面は `verify` で代替。
 
 ## 関連
 

@@ -154,6 +154,27 @@ wt_worker_read_plugins() {
     | jq -r '.[] | .name as $m | (.plugins // [])[] | "\($m)/\(.)"'
 }
 
+# Read a scalar from the [verify] table of config.toml (e.g. command, image).
+# Emits the raw value or nothing if unset / config or yq missing.
+wt_worker_verify_value() {
+  local key=$1 cfg
+  cfg=$(wt_worker_config_file)
+  [[ -f $cfg ]] || return 0
+  command -v yq >/dev/null 2>&1 || return 0
+  yq -p toml ".verify.${key} // \"\"" "$cfg" 2>/dev/null
+}
+
+# Emit one container cache path per line from [verify].caches in config.toml.
+# These are persisted across verify runs as per-repo named docker volumes so
+# repeat installs (pnpm store, cargo registry, playwright browsers) stay fast.
+wt_worker_verify_caches() {
+  local cfg
+  cfg=$(wt_worker_config_file)
+  [[ -f $cfg ]] || return 0
+  command -v yq >/dev/null 2>&1 || return 0
+  yq -p toml '.verify.caches // [] | .[]' "$cfg" 2>/dev/null
+}
+
 # Resolve <marketplace>/<name> to the latest version directory under
 # ~/.claude/plugins/cache/. Returns non-zero if not installed locally.
 wt_worker_resolve_plugin_dir() {
@@ -285,6 +306,70 @@ cmd_logs() {
   wezterm cli get-text --pane-id "$pane" --start-line "-$lines"
 }
 
+# Run the repo's test suite against a branch in a CLEAN linux container, so
+# native-binding tooling (vite-plus/rolldown, playwright, esbuild, ...) and
+# browser binaries match what CI runs — instead of the worker's dev sandbox,
+# where the host's macOS node_modules are mounted and fail to load on linux.
+#
+# The committed branch tree is exported with `git archive` (no node_modules /
+# target), piped into the container, and the user-declared [verify].command is
+# run there. The container exit code propagates: 0 = pass, non-zero = fail.
+# Caches (pnpm store, cargo, playwright) persist across runs as per-repo
+# named docker volumes declared in [verify].caches.
+cmd_verify() {
+  local branch=${1:?usage: wt-worker verify <branch>}
+  local toplevel repo image command
+  toplevel=$(git rev-parse --show-toplevel)
+  repo=$(basename "$toplevel")
+
+  command=$(wt_worker_verify_value command)
+  if [[ -z $command ]]; then
+    echo "wt-worker verify: no [verify] command in $(wt_worker_config_file)." >&2
+    echo "  Declare what 'verify' runs, e.g.:" >&2
+    echo "    [verify]" >&2
+    echo "    command = \"mise install && mise run web:e2e\"" >&2
+    echo "    caches  = [\"/home/agent/.local/share/pnpm/store\"]" >&2
+    exit 1
+  fi
+  image=$(wt_worker_verify_value image)
+  [[ -n $image ]] || image="${WT_WORKER_VERIFY_IMAGE:-tedsum/claude-code-mise:latest}"
+
+  if ! git -C "$toplevel" rev-parse --verify --quiet "refs/heads/$branch" >/dev/null; then
+    echo "wt-worker verify: branch '$branch' not found (verify tests the committed branch HEAD)." >&2
+    exit 1
+  fi
+
+  # Map each declared cache path to a deterministic per-repo named volume.
+  local mounts=() path vol
+  while IFS= read -r path; do
+    [[ -z $path ]] && continue
+    vol="wt-worker-verify-$(wt_worker_sanitize "$repo")-$(printf '%s' "$path" | tr -c 'A-Za-z0-9' '-')"
+    mounts+=(-v "$vol:$path")
+  done < <(wt_worker_verify_caches)
+
+  echo "wt-worker verify: testing committed '$branch' in clean container ($image)" >&2
+  echo "wt-worker verify: command: $command" >&2
+
+  # Run as root with HOME pinned to the image's agent home: the stock image runs
+  # as a non-root user, so a fresh /work dir and freshly-created named cache
+  # volumes (root-owned) would be unwritable. Root sidesteps both and matches
+  # how CI typically runs; HOME=/home/agent keeps mise's shims/installs resolved.
+  local rc=0
+  git -C "$toplevel" archive --format=tar "$branch" \
+    | docker run --rm -i --user root -e HOME=/home/agent \
+        "${mounts[@]+"${mounts[@]}"}" \
+        -e WT_WORKER_VERIFY=1 "$image" \
+        bash -lc 'set -e; mkdir -p /work && tar -x -C /work && cd /work && '"$command" \
+    || rc=$?
+
+  if [[ $rc -eq 0 ]]; then
+    echo "wt-worker verify: PASS (branch=$branch)" >&2
+  else
+    echo "wt-worker verify: FAIL rc=$rc (branch=$branch)" >&2
+  fi
+  return $rc
+}
+
 cmd_list() {
   sbx ls || true
 }
@@ -350,6 +435,10 @@ Commands:
                              the GitHub token every 50 min (best-effort).
   tell <branch> <message>    Send a message to a worker's REPL.
   logs <branch> [-n <lines>] Read the worker pane output (default: 200 lines).
+  verify <branch>            Run [verify].command against the committed branch
+                             in a clean linux container (CI-parity). Exits with
+                             the test command's code. Needs docker + a [verify]
+                             section in config.toml.
   list                       List active sandboxes (sbx ls).
   refresh <branch>           Manually re-mint the worker's scoped GitHub token
                              (normally automatic; useful if refresher died).
@@ -359,6 +448,7 @@ Commands:
 Env:
   WT_WORKER_SPAWN_WAIT       Seconds to wait before sending the initial task (default: 5)
   WT_WORKER_REFRESH_INTERVAL Seconds between background token refreshes (default: 3000)
+  WT_WORKER_VERIFY_IMAGE     Default image for `verify` (default: tedsum/claude-code-mise:latest)
   XDG_CONFIG_HOME            Used to locate config.toml (default: ~/.config)
 
 Auth:
@@ -373,8 +463,11 @@ Auth:
     - install: see https://github.com/td72/agent-gh-repo-token
 
 Config:
-  ~/.config/wt-worker/config.toml — [[marketplaces]] whose plugins are passed
-  to the worker as extra read-only workspaces and --plugin-dir args.
+  ~/.config/wt-worker/config.toml
+    [[marketplaces]]  plugins passed to the worker as extra read-only
+                      workspaces and --plugin-dir args.
+    [verify]          command (required to enable `verify`), optional image,
+                      and caches (container paths persisted as named volumes).
 
 Worktrees are created under .sbx/ in the repository root.
 Add .sbx/ to .gitignore to keep git status clean.
@@ -390,6 +483,7 @@ main() {
     spawn)         cmd_spawn "$@" ;;
     tell)          cmd_tell "$@" ;;
     logs)          cmd_logs "$@" ;;
+    verify)        cmd_verify "$@" ;;
     list)          cmd_list "$@" ;;
     refresh)       cmd_refresh "$@" ;;
     cleanup)       cmd_cleanup "$@" ;;
