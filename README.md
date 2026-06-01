@@ -31,3 +31,4 @@ mise run lint   # 全プラグインの lint
 ## ライセンス
 
 MIT (see `LICENSE`).
+<!-- m1-probe -->
