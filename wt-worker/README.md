@@ -80,6 +80,10 @@ wt-worker tell feature/foo "PR を作成してください"
 wt-worker logs feature/foo
 wt-worker logs feature/foo -n 50
 
+# コミット済みブランチを CI パリティのクリーンコンテナでテスト
+# (config.toml の [verify] が必要。e2e など native 依存タスクの検証用)
+wt-worker verify feature/foo
+
 # 起動中のサンドボックス一覧
 wt-worker list
 
@@ -93,6 +97,7 @@ wt-worker cleanup feature/foo
 /wt-worker:spawn feature/foo "実装タスクの説明"
 /wt-worker:tell  feature/foo "PR を作成してください"
 /wt-worker:logs  feature/foo
+/wt-worker:verify feature/foo
 /wt-worker:list
 /wt-worker:cleanup feature/foo
 ```

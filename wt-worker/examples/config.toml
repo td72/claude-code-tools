@@ -12,3 +12,22 @@ plugins = ["mise", "uv"]
 [[marketplaces]]
 name    = "claude-plugins-official"
 plugins = ["github"]
+
+# [verify] declares what `wt-worker verify <branch>` runs. The committed branch
+# tree is exported (git archive — no node_modules/target) into a clean linux
+# container and `command` is run there, so native-binding tooling and browsers
+# match CI instead of the worker's host-mounted (macOS) node_modules.
+#
+# - command : required. Without it, `verify` exits with a hint instead of running.
+# - image   : optional. Defaults to tedsum/claude-code-mise:latest
+#             (override per-invocation with WT_WORKER_VERIFY_IMAGE).
+# - caches  : optional. Container paths persisted across runs as per-repo named
+#             docker volumes — point these at your package/build caches so
+#             repeat installs stay fast.
+[verify]
+command = "mise install && pnpm install --frozen-lockfile && pnpm exec playwright install --with-deps && mise run web:e2e"
+caches  = [
+  "/home/agent/.local/share/pnpm/store",
+  "/home/agent/.cargo",
+  "/home/agent/.cache/ms-playwright",
+]
