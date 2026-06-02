@@ -3,7 +3,7 @@
 ## ゴール
 
 - 1 つの WezTerm ウィンドウ内で、**司令塔 claude** と **複数の worker claude** が共存する開発スタイルを定義する
-- 各 worker は独立した git worktree と Docker Sandboxes (sbx) 上で動作し、ホスト環境や他 worker と隔離される
+- 各 worker は Docker Sandboxes (sbx) の in-container クローン上で動作し、ホスト環境や他 worker と隔離される（ホスト repo は read-only）
 - 司令塔は worker pane を観察し、必要に応じて wezterm 経由で追加指示を投入できる
 - 本体リポジトリ (`~/src/...`) のクローン位置を汚さない
 
@@ -53,10 +53,11 @@
 ## ディレクトリレイアウト
 
 ```
-~/src/github.com/td72/<repo>/                       # 司令塔が動く本体
-  └─ .sbx/                                          # sbx が管理 (gitignore 推奨)
-       └─ wt-worker-<branch>-worktrees/<branch>/    # worker A の作業空間
-                                                    #  (sbx --branch が自動生成)
+~/src/github.com/td72/<repo>/                       # 司令塔が動く本体 (worker には RO で見える)
+                                                    #  ※ --clone のためホスト側 worktree は作らない
+
+(コンテナ内) /home/agent/workspace                  # worker A の作業空間 = repo のプライベートクローン
+                                                    #  origin = GitHub (https に書き換え)
 
 ~/.local/state/wt-worker/<repo>/                    # 司令塔のローカル状態 (XDG 準拠)
   ├─ panes/<branch>                                 # branch ごとの WezTerm pane-id
@@ -69,7 +70,7 @@
 | ツール | 用途 | 必須? |
 |---|---|---|
 | `wezterm` (cli) | pane の split / send-text / get-text | 必須 |
-| `sbx` | sandbox 作成 / 認証 / `--branch` で worktree 作成 | 必須 |
+| `sbx` | sandbox 作成 / 認証 / `--clone` で in-container クローン作成 | 必須 |
 | [`agent-gh-repo-token`](https://github.com/td72/agent-gh-repo-token) | per-repo の scoped GitHub token を mint | GitHub App 使用時 |
 | `op` (1Password CLI) | App private key 等の引き出し (agent-gh-repo-token が使用) | GitHub App 使用時 |
 
@@ -84,13 +85,17 @@ wt-worker spawn <branch> ["<initial-task>"]
 実行手順:
 
 1. `$WEZTERM_PANE` を司令塔の pane-id として記録
-2. `sbx create --branch=<branch> --name wt-worker-<branch> claude <toplevel> [plugin_dirs:ro...]`
-   - sbx が worktree を `<toplevel>/.sbx/<sandbox名>-worktrees/<branch>/` に作る
+2. `sbx create --clone --name wt-worker-<branch> claude <toplevel> [plugin_dirs:ro...]`
+   - sbx がコンテナ内に repo のプライベートクローンを作る（ホスト repo は RO マウント、ホスト側 worktree は無し）
 3. `~/.config/agent-gh-repo-token/repos.toml` があれば GitHub App token を mint し、
-   `sbx secret set <sandbox名> github` で sandbox 固有 secret として注入 (best-effort)
+   `sbx secret set <sandbox名> github` で sandbox 固有 secret として注入 (best-effort)。
+   同時に gh の hosts.yml と git の ssh→https 書き換え（`pushInsteadOf`）を仕込み、
+   worker が `git push origin <branch>` でそのまま GitHub に push できるようにする
 4. `wezterm cli split-pane --bottom --percent 30` で司令塔の下に pane を追加し、pane-id を保存
 5. pane 内で `sbx run <sandbox名> [-- --plugin-dir ...]` を実行して REPL に入る
-6. `<initial-task>` が指定されていれば、`sleep` 後にその文字列を pane に送信
+6. `sleep` 後、setup 行（`git checkout -b <branch>` でブランチ作成 + 完了時に push/PR する規約）を送信。
+   `<initial-task>` が指定されていれば setup 行に続けて送信する（sbx が branch を作らなくなったため、
+   ブランチ作成は worker が行う）
 
 認証は sbx プロキシが透過的に処理します (詳細は下「認証」セクション)。
 
@@ -148,9 +153,12 @@ wt-worker cleanup <branch>
 
 1. **refresher プロセスに SIGTERM** (race 防止のため最初)
 2. `sbx rm <sandbox名>` でサンドボックスを削除
-3. `git worktree remove --force` + `rmdir` で `.sbx/` 下のディレクトリを掃除
-4. `git branch -D <branch>` でブランチも削除
-5. `wezterm cli kill-pane` で pane を削除し pane-id / repo / pid ファイルを削除
+3. `sandbox-<sandbox名>` remote を掃除（セッション終了で自然消滅するが念のため）
+4. `wezterm cli kill-pane` で pane を削除し pane-id / repo / pid ファイルを削除
+
+> --clone ではホスト側 worktree もローカルブランチも作らない（作業はコンテナ内クローン）ため、
+> 旧来の `git worktree remove` / `git branch -D` は不要。worker が push したブランチは GitHub 上に
+> 残るので、不要なら PR クローズ時などに別途削除する。
 
 ### 7. Verify (CI パリティのテスト実行)
 
@@ -158,18 +166,20 @@ wt-worker cleanup <branch>
 wt-worker verify <branch>
 ```
 
-worker サンドボックスは**ホストの worktree を direct mount** するため、その
-`node_modules` は **ホスト OS (macOS) 向けのネイティブバイナリ**を含む。
-vite-plus / rolldown / oxc / esbuild などネイティブ binding を持つツールや
-Playwright のブラウザバイナリは Linux コンテナでロード・実行できず、`vp build`・
-e2e の webServer・ブラウザがことごとく落ちる。つまり **e2e はワーカー内で検証
-できない**（push して CI を見るまで結果が分からない盲目ループになる）。
+`verify` は**司令塔側**で、worker とは別のクリーンな Linux コンテナを立て、
+CI と同じ条件でブランチのテストを回す。
 
-`verify` はこれを回避する。**司令塔側**で、dev サンドボックスとは別の
-クリーンな Linux コンテナを立て、CI と同じ条件でテストを回す:
+> 背景: 旧 `--branch`（bind-mount）方式では worker の `node_modules` がホスト
+> (macOS) のネイティブバイナリで、vite-plus / rolldown / esbuild や Playwright
+> ブラウザが Linux コンテナでロードできず、e2e を worker 内で検証できなかった。
+> 現在の `--clone` 方式ではクローンに `node_modules` は含まれず worker 内で
+> `pnpm install` すれば Linux ネイティブになるため、この制約は緩和された。
+> それでも `verify` は **CI と同一条件・再現可能・push 前にローカルで赤緑が確定**
+> という価値があるため維持している（worker 内 e2e はブラウザや backend の準備が
+> 別途必要で確実性に欠ける）。
 
-1. `git archive <branch>` で**コミット済み**ブランチツリーを export
-   （`node_modules` / `target` を含まない）してコンテナに流し込む
+1. `git fetch origin <branch>`（または既存のローカルブランチ）→ `git archive` で
+   ブランチツリーを export（`node_modules` / `target` を含まない）してコンテナに流し込む
 2. `~/.config/wt-worker/config.toml` の `[verify].command` をコンテナ内で実行
    （例: `mise install && pnpm install --frozen-lockfile && pnpm exec playwright install --with-deps && mise run web:e2e`）
 3. コンテナの **exit code がそのまま結果** (0 = pass, 非0 = fail)
@@ -195,7 +205,7 @@ e2e の webServer・ブラウザがことごとく落ちる。つまり **e2e �
 PANE_ID=$(wezterm cli split-pane \
   --bottom --percent 30 \
   --pane-id "$WEZTERM_PANE" \
-  --cwd "$WORKTREE_PATH")
+  --cwd "$TOPLEVEL")   # --clone のためホスト worktree は無い。repo ルートに置く
 ```
 
 ### テキスト投入
@@ -284,11 +294,13 @@ curl -fsSL https://raw.githubusercontent.com/td72/agent-gh-repo-token/main/scrip
 1. **pane が増えすぎた場合**: 一定数を超えたら自動で tab に切り替える等の拡張は将来検討
 2. **依存関係のある worker**: worker B が worker A の成果物に依存するケースは MVP のスコープ外 (人間が `git merge` してから B を spawn)
 3. **完了の自動検知**: `✻ Worked for` パターン or git commit 監視で `wt-worker wait <branch>` を実装する余地あり
-4. **ワーカー内での e2e 検証**: 現状 `wt-worker verify` は司令塔側のクリーンコンテナで回す
-   (上記「7. Verify」)。ワーカー自身が e2e を回せるようにするには、dev サンドボックスの
-   `node_modules` を direct mount から外してコンテナローカルの volume にし、spawn 時に
-   install + ネイティブ rebuild する「自己完結モード」(`spawn --heavy` 等) が必要。投資が
-   大きいので当面は `verify` で代替。
+4. **ワーカー内での e2e 検証**: `--clone` 化で worker の `node_modules` は Linux ネイティブに
+   なり、原理上は worker 内でも e2e を回せる余地が出た。ただしブラウザバイナリや backend の
+   起動準備が別途必要で確実性に欠けるため、CI 一致・push 前の赤緑確定が要るケースは
+   司令塔側の `wt-worker verify`（上記「7. Verify」）を引き続き推奨。worker 内 e2e を
+   一級機能にするかは要検討。
+5. **commit 回収の代替経路**: worker は GitHub へ直接 push するが、`sandbox-<name>` remote
+   （セッション稼働中のみ）からホストが直接 fetch する運用も可能。push を介さないレビュー導線として将来検討。
 
 ## 関連
 

@@ -75,22 +75,34 @@ wt_worker_inject_github_secret() {
   return 1
 }
 
-# Pre-authenticate `gh` inside the sandbox so workers can `gh pr create` directly
-# instead of discovering gh is unauthenticated and falling back to raw REST calls.
-# We drop a hosts.yml whose oauth_token is a sentinel; the sbx proxy overwrites
-# the Authorization header on github.com with the real per-sandbox `github`
-# secret, so gh only needs to believe it is logged in. Done at runtime (a plain
-# file) rather than via the image or a kit, both of which break other sbx
-# integrations (see cmd_spawn). git push works through the proxy regardless.
-# Best-effort: a failure just means the worker must use the REST API for PRs.
+# Pre-authenticate `gh` inside the sandbox AND force git to reach github over
+# HTTPS, so workers can `git push origin` + `gh pr create` directly.
+#
+# Two things are configured (both in the container's persistent HOME, so they
+# survive into the later `sbx run` session):
+#   1. ~/.config/gh/hosts.yml with a sentinel oauth_token — the sbx proxy
+#      overwrites the Authorization header on github.com with the real
+#      per-sandbox `github` secret, so gh only needs to believe it is logged in.
+#   2. git pushInsteadOf/insteadOf rewriting git@github.com: -> https://github.com/.
+#      Under `--clone`, the in-container clone inherits the host's origin, which
+#      is usually an SSH URL; SSH cannot traverse the proxy (no keys, port 22
+#      closed), but HTTPS does. The rewrite lets the worker's natural
+#      `git push origin <branch>` transparently go over the authenticated HTTPS
+#      path without having to add a separate remote.
+# Done at runtime (plain files) rather than via the image or a kit, both of which
+# break other sbx integrations (see cmd_spawn). Best-effort: a failure just means
+# the worker may need to add an https remote / use the REST API for PRs.
 wt_worker_configure_gh() {
   local sandbox=$1
-  if sbx exec "$sandbox" -- bash -lc \
-      'mkdir -p ~/.config/gh && printf "github.com:\n    oauth_token: proxy-managed\n    git_protocol: https\n" > ~/.config/gh/hosts.yml' \
+  if sbx exec "$sandbox" -- bash -lc '
+      mkdir -p ~/.config/gh \
+        && printf "github.com:\n    oauth_token: proxy-managed\n    git_protocol: https\n" > ~/.config/gh/hosts.yml \
+        && git config --global url."https://github.com/".insteadOf "git@github.com:" \
+        && git config --global url."https://github.com/".pushInsteadOf "git@github.com:"' \
       >/dev/null 2>&1; then
-    echo "wt-worker spawn: pre-authenticated gh on sandbox=$sandbox" >&2
+    echo "wt-worker spawn: pre-authenticated gh + https rewrite on sandbox=$sandbox" >&2
   else
-    echo "wt-worker spawn: could not pre-configure gh (worker can still use the REST API)" >&2
+    echo "wt-worker spawn: could not pre-configure gh/git (worker can still use an https remote / REST API)" >&2
   fi
 }
 
@@ -191,7 +203,7 @@ wt_worker_resolve_plugin_dir() {
 cmd_spawn() {
   local branch=${1:?usage: wt-worker spawn <branch> [initial-task]}
   local task=${2:-}
-  local commander pane name toplevel worktree
+  local commander pane name toplevel
   commander=${WEZTERM_PANE:-}
   if [[ -z $commander ]]; then
     echo "wt-worker spawn: WEZTERM_PANE is not set. Run inside a WezTerm pane." >&2
@@ -217,14 +229,21 @@ cmd_spawn() {
     plugin_dirs+=("$host_dir")
   done < <(wt_worker_read_plugins)
 
-  # Create sandbox + worktree via sbx using the STOCK claude image. Auth is
-  # handled by the sbx proxy. We deliberately pass neither --template nor --kit:
-  # a custom --template image loses sbx's transparent git-push credential
-  # injection (push fails with "could not read Username"), and a --kit resets the
-  # agent's Anthropic credential wiring (worker REPL shows "Not logged in"). gh
-  # is instead pre-authenticated at runtime, below, with a plain config file.
-  # Worktree lands at <toplevel>/.sbx/<name>-worktrees/<branch-sanitized>/
-  sbx create --branch="$branch" --name "$name" --quiet \
+  # Create the sandbox via sbx using the STOCK claude image. Auth is handled by
+  # the sbx proxy. We deliberately pass neither --template nor --kit: a custom
+  # --template image loses sbx's transparent git-push credential injection (push
+  # fails with "could not read Username"), and a --kit resets the agent's
+  # Anthropic credential wiring (worker REPL shows "Not logged in"). gh + the
+  # git https rewrite are pre-configured at runtime, below, with plain files.
+  #
+  # --clone runs the agent on a PRIVATE in-container clone of the repo (the host
+  # repo is mounted read-only); there is no host-side worktree. The clone keeps
+  # the host's `origin` (so the worker pushes branches straight to GitHub over
+  # the proxy), and its commits are also reachable from the host via the
+  # `sandbox-<name>` git remote while the `sbx run` session is live. sbx dropped
+  # the old `--branch` flag; the worker creates the working branch itself (see
+  # the setup line sent to the REPL below).
+  sbx create --clone --name "$name" --quiet \
     claude "$toplevel" \
     ${extra_workspaces[@]+"${extra_workspaces[@]}"}
 
@@ -243,11 +262,11 @@ cmd_spawn() {
     echo "wt-worker spawn: no 'origin' remote, skipping github auth" >&2
   fi
 
-  worktree="$toplevel/.sbx/$name-worktrees/$(wt_worker_sanitize "$branch")"
-
-  # Open WezTerm pane anchored below the commander, cwd = worktree
+  # Open WezTerm pane anchored below the commander. There is no host worktree
+  # under --clone, so anchor the pane at the repo root; the worker operates on
+  # the in-container clone once `sbx run` attaches.
   pane=$(wezterm cli split-pane --bottom --percent 30 \
-    --pane-id "$commander" --cwd "$worktree")
+    --pane-id "$commander" --cwd "$toplevel")
   echo "$pane" > "$(wt_worker_pane_file "$branch")"
 
   # Build sbx run command; append -- --plugin-dir args if any plugins resolved
@@ -261,14 +280,21 @@ cmd_spawn() {
   fi
   wt_worker_send_line "$pane" "$run_cmd"
 
+  # The clone starts on the repo's default HEAD. sbx no longer creates the branch
+  # (--branch is gone), so the worker establishes it. This setup line also states
+  # the push/PR convention; the per-sandbox token + https rewrite (configured
+  # above) make `git push -u origin <branch>` + `gh pr create` work directly.
+  local setup="Create and switch to a new git branch '$branch' (git checkout -b $branch) for all work in this sandbox. When your changes are committed, run 'git push -u origin $branch' and open a PR with 'gh pr create'."
+  sleep "${WT_WORKER_SPAWN_WAIT:-5}"
   if [[ -n $task ]]; then
-    sleep "${WT_WORKER_SPAWN_WAIT:-5}"
-    wt_worker_send_line "$pane" "$task"
+    wt_worker_send_line "$pane" "$setup Task: $task"
+  else
+    wt_worker_send_line "$pane" "$setup"
   fi
 
   echo "wt-worker: spawned '$branch'"
   echo "  pane-id  = $pane"
-  echo "  worktree = $worktree"
+  echo "  mode     = clone (in-container; no host worktree)"
   echo "  sandbox  = $name"
 }
 
@@ -334,8 +360,19 @@ cmd_verify() {
   image=$(wt_worker_verify_value image)
   [[ -n $image ]] || image="${WT_WORKER_VERIFY_IMAGE:-tedsum/claude-code-mise:latest}"
 
-  if ! git -C "$toplevel" rev-parse --verify --quiet "refs/heads/$branch" >/dev/null; then
-    echo "wt-worker verify: branch '$branch' not found (verify tests the committed branch HEAD)." >&2
+  # Resolve a git ref to export. Under --clone the worker pushes its branch to
+  # GitHub rather than to a host worktree, so the branch usually is NOT a local
+  # ref here — fetch it from origin. Prefer an existing local branch (e.g. the
+  # user already fetched it) and fall back to fetching origin/<branch>.
+  local ref
+  if git -C "$toplevel" rev-parse --verify --quiet "refs/heads/$branch" >/dev/null; then
+    ref=$branch
+  elif git -C "$toplevel" fetch --quiet origin "$branch" 2>/dev/null; then
+    ref=FETCH_HEAD
+    echo "wt-worker verify: fetched '$branch' from origin" >&2
+  else
+    echo "wt-worker verify: branch '$branch' not found locally or on origin." >&2
+    echo "  verify tests the pushed branch — make sure the worker has pushed it." >&2
     exit 1
   fi
 
@@ -347,7 +384,7 @@ cmd_verify() {
     mounts+=(-v "$vol:$path")
   done < <(wt_worker_verify_caches)
 
-  echo "wt-worker verify: testing committed '$branch' in clean container ($image)" >&2
+  echo "wt-worker verify: testing '$branch' ($ref) in clean container ($image)" >&2
   echo "wt-worker verify: command: $command" >&2
 
   # Run as root with HOME pinned to the image's agent home: the stock image runs
@@ -355,7 +392,7 @@ cmd_verify() {
   # volumes (root-owned) would be unwritable. Root sidesteps both and matches
   # how CI typically runs; HOME=/home/agent keeps mise's shims/installs resolved.
   local rc=0
-  git -C "$toplevel" archive --format=tar "$branch" \
+  git -C "$toplevel" archive --format=tar "$ref" \
     | docker run --rm -i --user root -e HOME=/home/agent \
         "${mounts[@]+"${mounts[@]}"}" \
         -e WT_WORKER_VERIFY=1 "$image" \
@@ -438,27 +475,23 @@ cmd_wait() {
 
 cmd_cleanup() {
   local branch=${1:?usage: wt-worker cleanup <branch>}
-  local name pane pane_file repo_file toplevel worktree_dir
+  local name pane pane_file repo_file
   name="wt-worker-$(wt_worker_sanitize "$branch")"
   pane_file=$(wt_worker_pane_file "$branch")
   repo_file=$(wt_worker_repo_file "$branch")
-  toplevel=$(git rev-parse --show-toplevel)
-  worktree_dir="$toplevel/.sbx/$name-worktrees"
 
   # Stop the background refresher first so it doesn't race against sbx rm.
   wt_worker_stop_refresher "$branch"
 
   # --force: cleanup is non-interactive (also runs from scripts), so skip the
   # confirmation prompt. Without it sbx rm hangs/aborts when stdin isn't a TTY,
-  # orphaning the sandbox while the worktree/branch/pane are already gone.
+  # orphaning the sandbox while the pane is already gone.
   sbx rm --force "$name" 2>/dev/null || true
 
-  # sbx rm is best-effort on worktree cleanup; remove explicitly if still present
-  if [[ -d $worktree_dir ]]; then
-    git worktree remove --force "$worktree_dir/$(wt_worker_sanitize "$branch")" 2>/dev/null || true
-    rmdir "$worktree_dir" 2>/dev/null || true
-    git branch -D "$branch" 2>/dev/null || true
-  fi
+  # Under --clone there is no host worktree or local branch to remove (the work
+  # lives in the in-container clone). The `sandbox-<name>` git remote dies with
+  # the sbx run session, but drop it explicitly in case a stale entry remains.
+  git remote remove "sandbox-$name" 2>/dev/null || true
 
   if [[ -f $pane_file ]]; then
     pane=$(cat "$pane_file")
@@ -475,7 +508,8 @@ cmd_help() {
 Usage: wt-worker <command> [args...]
 
 Commands:
-  spawn <branch> [<task>]    Create a worktree + sandbox, start a worker.
+  spawn <branch> [<task>]    Create an in-container clone sandbox, start a worker
+                             and tell it to work on <branch> (push + PR itself).
                              Also starts a background refresher that re-mints
                              the GitHub token every 50 min (best-effort).
   tell <branch> <message>    Send a message to a worker's REPL.
@@ -520,8 +554,10 @@ Config:
     [verify]          command (required to enable `verify`), optional image,
                       and caches (container paths persisted as named volumes).
 
-Worktrees are created under .sbx/ in the repository root.
-Add .sbx/ to .gitignore to keep git status clean.
+Workers run on a private in-container clone (sbx --clone); the host repo is
+mounted read-only and there is no host worktree. The worker pushes its branch
+to GitHub directly; commits are also reachable via the sandbox-<name> remote
+while the session is live.
 
 See docs/worktree-workflow.md for design.
 EOF
