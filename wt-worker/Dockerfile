@@ -2,6 +2,13 @@ FROM docker/sandbox-templates:claude-code
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
+USER root
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      build-essential \
+      pkg-config \
+      libssl-dev \
+ && apt-get clean \
+ && rm -rf /var/lib/apt/lists/*
 USER agent
 
 WORKDIR /workspace
