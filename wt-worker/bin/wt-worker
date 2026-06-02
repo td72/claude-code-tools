@@ -106,6 +106,60 @@ wt_worker_configure_gh() {
   fi
 }
 
+# Install pre-commit hooks (prek or pre-commit) in the in-container clone so the
+# worker's commits pass the same local quality gate as the host developer's.
+# Git hooks live in .git/hooks/ and are not cloned — each environment needs one
+# install run. Best-effort: a failure never aborts spawn.
+wt_worker_install_precommit() {
+  local sandbox=$1
+  local result
+  # shellcheck disable=SC2016  # $d/$workspace are inner-bash vars, not outer-shell expansions
+  result=$(sbx exec "$sandbox" -- bash -lc '
+      workspace=""
+      for d in /workspace ~/workspace; do
+        if [[ -d "$d/.git" ]]; then
+          workspace=$d
+          break
+        fi
+      done
+      if [[ -z $workspace ]]; then
+        echo "no-workspace"
+        exit 0
+      fi
+      cd "$workspace"
+      if [[ ! -f prek.toml && ! -f .pre-commit-config.yaml ]]; then
+        echo "no-config"
+        exit 0
+      fi
+      if command -v prek >/dev/null 2>&1; then
+        if prek install >/dev/null 2>&1; then
+          echo "installed:prek"
+        else
+          echo "failed:prek"
+        fi
+      elif command -v pre-commit >/dev/null 2>&1; then
+        if pre-commit install >/dev/null 2>&1; then
+          echo "installed:pre-commit"
+        else
+          echo "failed:pre-commit"
+        fi
+      else
+        echo "skipped:no-tool"
+      fi' 2>/dev/null) || result="exec-error"
+  case "$result" in
+    installed:*)
+      echo "wt-worker spawn: pre-commit hooks installed (${result#installed:}) on sandbox=$sandbox" >&2 ;;
+    no-config|no-workspace)
+      echo "wt-worker spawn: pre-commit hook install skipped ($result) on sandbox=$sandbox" >&2 ;;
+    skipped:*)
+      echo "wt-worker spawn: pre-commit hook install skipped (${result#skipped:}) on sandbox=$sandbox" >&2 ;;
+    failed:*|exec-error)
+      echo "wt-worker spawn: pre-commit hook install failed (${result#failed:}); spawn continues" >&2 ;;
+    *)
+      echo "wt-worker spawn: pre-commit hook install skipped (unknown) on sandbox=$sandbox" >&2 ;;
+  esac
+}
+
 # Background refresher: periodically re-mint the sandbox's scoped GitHub token
 # so workers that run longer than the 1-hour installation-token TTL keep working.
 # Runs until the sandbox is removed (cleanup) or the process is killed.
@@ -281,6 +335,9 @@ cmd_spawn() {
   else
     echo "wt-worker spawn: no 'origin' remote, skipping github auth" >&2
   fi
+
+  # Install pre-commit hooks in the in-container clone (best-effort).
+  wt_worker_install_precommit "$name"
 
   # Open WezTerm pane anchored below the commander. There is no host worktree
   # under --clone, so anchor the pane at the repo root; the worker operates on

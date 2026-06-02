@@ -1,7 +1,7 @@
 {
   "name": "wt-worker",
   "description": "wt-worker (wt = WorkTree + WezTerm): spawn and manage parallel Claude worker agents in Docker sandboxes (in-container clones), observable through WezTerm panes.",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "author": {
     "name": "Kohei Hosokawa"
   },
