@@ -200,10 +200,30 @@ wt_worker_resolve_plugin_dir() {
   echo "$base/$latest"
 }
 
+# Fail fast with a clear message before touching sbx/wezterm. Checks the two
+# REQUIRED tools exist, and that this sbx supports `--clone` (a capability check,
+# not a version-string compare: sbx removed `--branch` in favour of `--clone`,
+# and an old sbx would otherwise fail cryptically deep inside `sbx create`).
+wt_worker_preflight_spawn() {
+  local missing=()
+  command -v sbx >/dev/null 2>&1 || missing+=(sbx)
+  command -v wezterm >/dev/null 2>&1 || missing+=(wezterm)
+  if [[ ${#missing[@]} -gt 0 ]]; then
+    echo "wt-worker spawn: required tool(s) not found on PATH: ${missing[*]}" >&2
+    exit 1
+  fi
+  if ! sbx create --help 2>/dev/null | grep -q -- '--clone'; then
+    echo "wt-worker spawn: this sbx does not support '--clone'." >&2
+    echo "  wt-worker now runs workers on in-container clones; please update sbx." >&2
+    exit 1
+  fi
+}
+
 cmd_spawn() {
   local branch=${1:?usage: wt-worker spawn <branch> [initial-task]}
   local task=${2:-}
   local commander pane name toplevel
+  wt_worker_preflight_spawn
   commander=${WEZTERM_PANE:-}
   if [[ -z $commander ]]; then
     echo "wt-worker spawn: WEZTERM_PANE is not set. Run inside a WezTerm pane." >&2
