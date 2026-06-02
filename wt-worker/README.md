@@ -104,19 +104,16 @@ wt-worker cleanup feature/foo
 
 > `disable-model-invocation: true` が設定されているため、司令塔 Claude が自動で spawn することはありません。
 
-## worktree の場所
+## worker の作業空間 (in-container clone)
 
-`wt-worker spawn` は `sbx --branch` を使い、worktree を次のパスに作成します:
+`wt-worker spawn` は `sbx --clone` を使い、worker を**コンテナ内のプライベートクローン**で動かします（ホスト repo は read-only マウント、ホスト側 worktree は作りません）。クローンはホストの `origin` を引き継ぐため、worker は **`git push origin <branch>` でそのまま GitHub に push** できます（spawn が ssh→https の書き換えと token 注入を仕込むため）。worker の commit はセッション稼働中、ホストから `sandbox-<name>` remote 経由でも参照できます。
 
 ```
-<repo-root>/.sbx/wt-worker-<branch>-worktrees/<branch-sanitized>/
+ホスト repo (RO) ──clone──▶ コンテナ内 /home/agent/workspace (worker の作業空間)
+                              └─ origin = GitHub (https に書き換え) → push/PR は worker が直接
 ```
 
-`.sbx/` は `.gitignore` に追加しておいてください:
-
-```bash
-echo '.sbx/' >> .gitignore
-```
+> 旧 sbx の `--branch`（`.sbx/` 下にホスト worktree を作る方式）は廃止されました。
 
 ## worker への plugin 引き継ぎ
 
