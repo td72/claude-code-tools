@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(wt-worker preview-push:*)",
+      "Bash(./wt-worker/bin/wt-worker preview-push:*)"
+    ],
+    "ask": [
+      "Bash(wt-worker push:*)",
+      "Bash(./wt-worker/bin/wt-worker push:*)"
+    ]
+  }
+}

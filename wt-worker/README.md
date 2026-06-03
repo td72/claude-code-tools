@@ -84,6 +84,13 @@ wt-worker logs feature/foo -n 50
 # (config.toml の [verify] が必要。e2e など native 依存タスクの検証用)
 wt-worker verify feature/foo
 
+# worker の branch をホスト側から origin へ push (SSH 経由)
+# .github/workflows を変更する branch 用の人間ゲート付き経路。
+# 読み取り(preview-push)と実push(push)を別コマンドに分け、push 側を
+# .claude/settings.json の `ask` で毎回プロンプト＝人間ゲートにしている。
+wt-worker preview-push feature/foo   # diff を表示するだけ (自由に実行可)
+wt-worker push feature/foo           # 実 push (許可プロンプトが出る)
+
 # 起動中のサンドボックス一覧
 wt-worker list
 
@@ -98,6 +105,7 @@ wt-worker cleanup feature/foo
 /wt-worker:tell  feature/foo "PR を作成してください"
 /wt-worker:logs  feature/foo
 /wt-worker:verify feature/foo
+/wt-worker:push  feature/foo   # preview-push で diff 確認 → push (許可プロンプト)
 /wt-worker:list
 /wt-worker:cleanup feature/foo
 ```
@@ -114,6 +122,16 @@ wt-worker cleanup feature/foo
 ```
 
 > 旧 sbx の `--branch`（`.sbx/` 下にホスト worktree を作る方式）は廃止されました。
+
+### `.github/workflows` を変更する branch（ホスト側 push の人間ゲート）
+
+worker の scoped token は意図的に `workflows` スコープを持たないため、`.github/workflows/*` を
+変更するコミットの push は GitHub に拒否される（CI = secrets 付き任意コード実行なので、半自律
+エージェントに常設で渡さない最小権限の設計）。この場合 worker は**リトライせず停止・報告**し、
+司令塔がホスト側から SSH で push する。読み取り（`wt-worker preview-push`）と実 push
+（`wt-worker push`）を別コマンドに分け、`push` 側を `.claude/settings.json` の `ask` で
+**毎回許可プロンプト**にすることで、CI 改変の前に人間が必ず diff を確認する導線を権限レイヤで
+強制している。詳細は [`docs/worktree-workflow.md` の「8. Push」](./docs/worktree-workflow.md)。
 
 ## worker への plugin 引き継ぎ
 

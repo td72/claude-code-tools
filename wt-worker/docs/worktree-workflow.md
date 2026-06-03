@@ -191,7 +191,67 @@ CI と同じ条件でブランチのテストを回す。
 `verify` はヒントを出して終了する。`verify` はコミット済み HEAD を対象とするため、
 **先にコミットしてから**呼ぶ。
 
-### 8. その他
+### 8. Push (ホスト側 push / workflow ファイルの人間ゲート)
+
+```bash
+wt-worker preview-push <branch>   # 読み取り: diff を表示するだけ（自由に実行可）
+wt-worker push <branch>           # 特権: origin へ実 push（許可プロンプトが出る）
+```
+
+worker は sbx プロキシ経由で **scoped GitHub App token**（`repo` 相当、`workflows` 無し）で
+push する。GitHub は **App token による `.github/workflows/*` の変更 push を拒否**する:
+
+```
+! [remote rejected] ... (refusing to allow a GitHub App to create or update
+  workflow `.github/workflows/build.yml` without `workflows` permission)
+```
+
+これは意図的な設計である。workflow ファイルを書ける = CI パイプラインそのものを書き換えられる
+= CI に渡る secrets を使った任意コード実行・持ち出しが可能、という質的に異なる特権面のため、
+半自律エージェントに `workflows` スコープを常設で渡さない（最小権限）。よって worker は
+この拒否に当たったら **リトライせず停止し、「ホスト側 push が必要」と報告**する（spawn 時の
+setup プロンプトにこの指示を埋め込んでいる）。司令塔がホスト側 push を肩代わりする。
+
+#### なぜ 1 コマンドでなく 2 コマンドに割ったか（人間ゲートの置き場所）
+
+「push 前に人間が workflow diff を目視」を強制したいが、**`--yes` のようなフラグはゲートに
+ならない**。司令塔エージェント自身が `--yes` を付けて叩けてしまうからだ。ゲートは
+**Claude Code の権限レイヤ（許可プロンプト）に置く**しかない。だが prefix マッチの許可ルールは
+`push` と `push --yes` を区別できない（フラグ末尾を切り出せない）。そこで **読み取りと実 push を
+別の動詞に分ける**:
+
+| コマンド | 役割 | 権限の置き方 |
+|---|---|---|
+| `wt-worker preview-push <branch>` | `sandbox-<name>` remote から fetch し、変更ファイル（`.github/workflows/*` を強調）＋ full diff を表示。**push しない** | `allow`（自由に実行） |
+| `wt-worker push <branch>` | `origin` へ実 push。SSH なら人間の鍵で認証され `workflows` 制限を受けない | `ask`（**毎回プロンプト**＝人間ゲート） |
+
+このリポジトリの `.claude/settings.json` がそのルールを持つ（`deny` > `ask` > `allow` の
+優先順で、`Bash(wt-worker:*)` を全許可していても `ask` の `Bash(wt-worker push:*)` が勝つ）:
+
+```json
+{
+  "permissions": {
+    "allow": ["Bash(wt-worker preview-push:*)"],
+    "ask":   ["Bash(wt-worker push:*)"]
+  }
+}
+```
+
+エージェントの流れ:
+
+1. `wt-worker preview-push foo`（自由）→ diff を人間に提示
+2. 人間が確認 → `wt-worker push foo` → **harness の許可プロンプト**が出る → 人間が承認して初めて push
+
+`preview-push` を `push` の prefix にしない（`push-preview` ではなく `preview-push`）ことで、
+`ask` の `Bash(wt-worker push:*)` が読み取り側を巻き込まないようにしている。
+
+workflow を含まない通常ブランチでも、worker の token が失効した等のフォールバック push として汎用に使える。
+
+> 関連: worker の push が `workflows` 拒否で詰まったら、worker を cleanup する前にこのコマンドを
+> 使う（`sandbox-<name>` remote はセッション終了で消えるため）。
+> 「ソース(.rs 等)は worker 自走で push、workflow は host ゲート」という非対称運用が標準。
+
+### 9. その他
 
 | コマンド | 用途 |
 |---|---|
@@ -300,7 +360,9 @@ curl -fsSL https://raw.githubusercontent.com/td72/agent-gh-repo-token/main/scrip
    司令塔側の `wt-worker verify`（上記「7. Verify」）を引き続き推奨。worker 内 e2e を
    一級機能にするかは要検討。
 5. **commit 回収の代替経路**: worker は GitHub へ直接 push するが、`sandbox-<name>` remote
-   （セッション稼働中のみ）からホストが直接 fetch する運用も可能。push を介さないレビュー導線として将来検討。
+   （セッション稼働中のみ）からホストが直接 fetch する運用も可能。`wt-worker push`（上記「8. Push」）が
+   この経路を使ってホスト側 push を行う。push を介さないレビュー導線（fetch だけして手元で確認）への
+   拡張は将来検討。
 
 ## 関連
 

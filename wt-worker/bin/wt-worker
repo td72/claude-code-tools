@@ -361,7 +361,7 @@ cmd_spawn() {
   # (--branch is gone), so the worker establishes it. This setup line also states
   # the push/PR convention; the per-sandbox token + https rewrite (configured
   # above) make `git push -u origin <branch>` + `gh pr create` work directly.
-  local setup="Create and switch to a new git branch '$branch' (git checkout -b $branch) for all work in this sandbox. When your changes are committed, run 'git push -u origin $branch' and open a PR with 'gh pr create'."
+  local setup="Create and switch to a new git branch '$branch' (git checkout -b $branch) for all work in this sandbox. When your changes are committed, run 'git push -u origin $branch' and open a PR with 'gh pr create'. If that push is rejected because it changes .github/workflows (a '... without workflows permission' error), do NOT retry — your token intentionally lacks that scope. Stop and report that this branch needs a host-side push (the commander runs 'wt-worker push $branch')."
   sleep "${WT_WORKER_SPAWN_WAIT:-5}"
   if [[ -n $task ]]; then
     wt_worker_send_line "$pane" "$setup Task: $task"
@@ -484,6 +484,141 @@ cmd_verify() {
   return $rc
 }
 
+# Host-side push of a worker's branch. Split into two commands by PRIVILEGE so
+# the human gate lives at the permission layer, not in a flag the agent can pass
+# itself:
+#
+#   wt-worker preview-push <branch>  read-only: fetch + show the diff. SAFE.
+#   wt-worker push <branch>          actually push to origin. PRIVILEGED.
+#
+# Why this exists: workers push over the sbx proxy using a scoped GitHub App
+# installation token (`repo` permission). GitHub REFUSES App-token pushes that
+# touch `.github/workflows/*` unless the token also carries the `workflows`
+# permission — and we deliberately do NOT grant that (a workflow file is CI
+# arbitrary-code-execution + secrets access; handing that to a semi-autonomous
+# agent violates least-privilege). So when a worker's push is rejected with
+# "refusing to allow a GitHub App to ... workflow ... without `workflows`
+# permission", it STOPS and reports that a host-side push is needed; the
+# commander then previews and pushes from the host, whose SSH key is NOT subject
+# to the App-token `workflows` restriction, so workflow changes go through.
+#
+# It also works for ordinary (non-workflow) branches as a generic fallback when
+# the worker's scoped token can't push for any reason (e.g. token expired).
+#
+# The two commands are separate verbs (not push +/- a flag) on purpose: a flag
+# can't be carved out by a prefix permission rule, but a distinct verb can. The
+# recommended posture is to leave `preview-push` auto-allowed and put
+# `wt-worker push` in the permission `ask` tier, so every real push prompts a
+# human — the structural gate that issue #18 asks for. See this repo's
+# .claude/settings.json for the rule.
+
+# Fetch the worker's branch from the live `sandbox-<name>` remote (created by
+# `sbx --clone`'s git-daemon; only exists while the run session is alive), print
+# the changed files + workflow diff to stderr (for the human gate / transcript),
+# and echo the resolved commit SHA on stdout. Used by both preview-push (stops
+# after the diff) and push (pushes the echoed SHA). Returns non-zero on any
+# precondition failure.
+wt_worker_push_prepare() {
+  local branch=$1
+  local name remote toplevel
+  name="wt-worker-$(wt_worker_sanitize "$branch")"
+  remote="sandbox-$name"
+  toplevel=$(git rev-parse --show-toplevel)
+
+  if ! git -C "$toplevel" remote get-url "$remote" >/dev/null 2>&1; then
+    echo "wt-worker: no '$remote' remote on the host." >&2
+    echo "  It is created by 'sbx --clone' and only exists while the worker's" >&2
+    echo "  'sbx run' session is alive. Make sure the worker is running, then retry." >&2
+    return 1
+  fi
+  if ! git -C "$toplevel" fetch --quiet "$remote" "$branch" 2>/dev/null; then
+    echo "wt-worker: could not fetch '$branch' from '$remote'." >&2
+    echo "  Make sure the worker has committed on branch '$branch'." >&2
+    return 1
+  fi
+
+  local head_sha base_sha files workflow_files
+  head_sha=$(git -C "$toplevel" rev-parse FETCH_HEAD)
+  # Diff base: where this branch diverged from the commander's checked-out HEAD
+  # (usually the default branch). Purely local, no extra network round-trip.
+  base_sha=$(git -C "$toplevel" merge-base "$head_sha" HEAD 2>/dev/null || true)
+  if [[ -n $base_sha ]]; then
+    files=$(git -C "$toplevel" diff --name-only "$base_sha" "$head_sha")
+  else
+    files=$(git -C "$toplevel" show --no-patch --pretty=format: --name-only "$head_sha")
+  fi
+  workflow_files=$(printf '%s\n' "$files" | grep -E '^\.github/workflows/' || true)
+
+  {
+    echo "wt-worker: '$branch' @ ${head_sha:0:12} (from $remote)"
+    echo ""
+    echo "Changed files:"
+    if [[ -n $files ]]; then
+      printf '%s\n' "$files" | sed 's/^/    /'
+    else
+      echo "    (none)"
+    fi
+    if [[ -n $workflow_files ]]; then
+      echo ""
+      echo "  ⚠️  Modifies GitHub Actions workflow files (CI definition):"
+      printf '%s\n' "$workflow_files" | sed 's/^/      /'
+      echo "      Review the full workflow diff below before approving the push."
+    fi
+    echo ""
+    if [[ -n $base_sha ]]; then
+      git -C "$toplevel" --no-pager diff --stat "$base_sha" "$head_sha"
+    fi
+    # Always show the FULL diff of workflow files — that is the change the human
+    # gate exists for.
+    if [[ -n $workflow_files ]]; then
+      echo ""
+      echo "--- full diff of .github/workflows/* ---"
+      # shellcheck disable=SC2086  # workflow_files is an intentional path list
+      git -C "$toplevel" --no-pager diff "$base_sha" "$head_sha" -- $workflow_files
+    fi
+  } >&2
+
+  echo "$head_sha"
+}
+
+cmd_preview_push() {
+  local branch=${1:?usage: wt-worker preview-push <branch>}
+  # Discard the SHA on stdout; the diff (on stderr) is what we want to surface.
+  wt_worker_push_prepare "$branch" >/dev/null || exit $?
+  echo "" >&2
+  echo "wt-worker preview-push: review the diff above. To push, run:" >&2
+  echo "    wt-worker push $branch" >&2
+}
+
+cmd_push() {
+  local branch=${1:?usage: wt-worker push <branch>}
+  local toplevel origin_url head_sha
+
+  toplevel=$(git rev-parse --show-toplevel)
+  # origin must exist; warn (don't block) if it isn't SSH — the whole point is
+  # that SSH bypasses the App-token `workflows` restriction. An https origin
+  # falls back to the host's git credential helper, which only works for
+  # workflow files if those creds happen to carry the `workflow` scope.
+  if ! origin_url=$(git -C "$toplevel" remote get-url origin 2>/dev/null) || [[ -z $origin_url ]]; then
+    echo "wt-worker push: no 'origin' remote on the host." >&2
+    exit 1
+  fi
+  case "$origin_url" in
+    git@*|ssh://*) : ;;  # SSH — bypasses the workflows restriction.
+    *) echo "wt-worker push: origin is not SSH ($origin_url); pushing with the host's git" >&2
+       echo "  credentials. Workflow-file pushes will still be rejected unless those creds" >&2
+       echo "  carry the 'workflow' scope." >&2 ;;
+  esac
+
+  # Fetch + show the diff once more (transcript record), then push. The human
+  # gate is the permission `ask` rule on `wt-worker push`, not anything here.
+  head_sha=$(wt_worker_push_prepare "$branch") || exit $?
+  echo "" >&2
+  echo "wt-worker push: pushing ${head_sha:0:12} -> origin ($origin_url) refs/heads/$branch ..." >&2
+  git -C "$toplevel" push origin "$head_sha:refs/heads/$branch"
+  echo "wt-worker push: pushed '$branch' to origin." >&2
+}
+
 cmd_list() {
   sbx ls || true
 }
@@ -600,6 +735,19 @@ Commands:
                              in a clean linux container (CI-parity). Exits with
                              the test command's code. Needs docker + a [verify]
                              section in config.toml.
+  preview-push <branch>      Read-only: fetch the worker's branch from the live
+                             sandbox-<name> remote and show the changed files
+                             (highlighting .github/workflows/*) + diff. Does NOT
+                             push. Safe to auto-allow.
+  push <branch>              Push a worker's branch to origin FROM THE HOST, over
+                             the host's transport (SSH). Use when a worker push is
+                             rejected because it changes .github/workflows (the
+                             scoped App token lacks `workflows` by design); SSH
+                             bypasses that. This is the PRIVILEGED counterpart to
+                             preview-push — gate it behind a permission `ask` rule
+                             (Bash(wt-worker push:*)) so every push prompts a human
+                             (the gate; see .claude/settings.json). Run
+                             preview-push first to review the diff.
   list                       List active sandboxes (sbx ls).
   refresh <branch>           Manually re-mint the worker's scoped GitHub token
                              (normally automatic; useful if refresher died).
@@ -649,6 +797,8 @@ main() {
     logs)          cmd_logs "$@" ;;
     wait)          cmd_wait "$@" ;;
     verify)        cmd_verify "$@" ;;
+    preview-push)  cmd_preview_push "$@" ;;
+    push)          cmd_push "$@" ;;
     list)          cmd_list "$@" ;;
     refresh)       cmd_refresh "$@" ;;
     cleanup)       cmd_cleanup "$@" ;;

@@ -2,3 +2,9 @@ mise.local.toml
 .mise.local.toml
 .sbx/
 .env
+
+# .claude/ is ignored globally (~/.config/git/ignore). Track only the shared,
+# version-controlled project permissions; keep personal/local state ignored.
+!.claude/
+.claude/*
+!.claude/settings.json
