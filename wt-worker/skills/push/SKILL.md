@@ -61,5 +61,7 @@ Report the result (pushed / rejected) back to the user.
   cleanup, or the commits are out of the host's reach.
 - The worker has **committed** on `<branch>`.
 - The host's `origin` is reachable over SSH (the case this is built for; an
-  https origin only pushes workflow files if the host's git credentials carry
-  the `workflow` scope).
+  https origin only pushes workflow files if the host's git credentials are
+  allowed to update workflows — a classic PAT's `workflow` scope / an OAuth
+  token's `workflow` scope, which is distinct from the GitHub App's `workflows`
+  permission named above).
