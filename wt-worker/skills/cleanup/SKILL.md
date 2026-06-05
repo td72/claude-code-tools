@@ -1,6 +1,5 @@
 ---
-description: Stop a worker's Docker sandbox, kill its WezTerm pane, remove its git worktree and branch, and stop its token refresher.
-disable-model-invocation: true
+description: Stop a worker's Docker sandbox, kill its WezTerm pane, drop the sandbox-<name> git remote, and stop its token refresher.
 ---
 
 # /wt-worker:cleanup
@@ -14,8 +13,10 @@ wt-worker cleanup "<branch>"
 ```
 
 This stops the background GitHub-token refresher, removes the sandbox
-(`sbx rm --force`), removes the `.sbx/` worktree and its branch, and kills the
-WezTerm pane.
+(`sbx rm --force`), drops the `sandbox-<name>` git remote, and kills the WezTerm
+pane. Under `--clone` there is no host-side worktree or local branch to remove
+(the work lived in the in-container clone); the worker's pushed branch stays on
+GitHub.
 
 ## Re-testing / iteration hygiene
 

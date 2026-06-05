@@ -94,7 +94,7 @@ wt-worker push feature/foo           # 実 push (許可プロンプトが出る)
 # 起動中のサンドボックス一覧
 wt-worker list
 
-# 片付け (sandbox + worktree + pane をまとめて削除)
+# 片付け (sandbox + pane + sandbox-<name> remote をまとめて片付け)
 wt-worker cleanup feature/foo
 ```
 
@@ -110,7 +110,12 @@ wt-worker cleanup feature/foo
 /wt-worker:cleanup feature/foo
 ```
 
-> `disable-model-invocation: true` が設定されているため、司令塔 Claude が自動で spawn することはありません。
+> 司令塔 Claude は「wt-worker に投げて」等の依頼に応じて、これらの skill（および同名の
+> `wt-worker` CLI）で worker を起動・観測・片付けできます。組み込みの Agent/Task ツールは
+> wt-worker では**ない**（pane も Docker サンドボックスも無い別物）ので代用されません。
+> 唯一 `push` だけは `disable-model-invocation: true` のまま据え置き、共有 origin への push は
+> `.claude/settings.json` の権限 `ask` ルールで人間ゲートにしています（下記「`.github/workflows`
+> を変更する branch」の節を参照）。
 
 ## worker の作業空間 (in-container clone)
 

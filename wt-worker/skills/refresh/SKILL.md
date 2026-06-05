@@ -1,6 +1,5 @@
 ---
 description: Manually re-mint the scoped GitHub token for a running worker sandbox (useful when the background refresher has died or the token has expired).
-disable-model-invocation: true
 ---
 
 # /wt-worker:refresh

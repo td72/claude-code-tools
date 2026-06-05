@@ -1,9 +1,8 @@
 ---
-description: Send a follow-up message to an already-spawned worker Claude through its WezTerm pane.
-disable-model-invocation: true
+description: Send a follow-up message or hand a detailed plan to an already-spawned worker Claude through its WezTerm pane.
 ---
 
-# /worker:tell
+# /wt-worker:tell
 
 Send a message to an existing worker. The user invoked this skill with: `$ARGUMENTS`
 
