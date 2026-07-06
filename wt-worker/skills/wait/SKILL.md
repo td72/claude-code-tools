@@ -1,9 +1,8 @@
 ---
 description: Poll a worker Claude's pane until a turn completes (✻ Worked for … appears), then exit 0.
-disable-model-invocation: true
 ---
 
-# /worker:wait
+# /wt-worker:wait
 
 Wait for a worker to finish its current task. The user invoked this skill with: `$ARGUMENTS`
 
@@ -20,5 +19,5 @@ Exit codes:
 - **1** — timed out (`-t`) before a completion signal was seen.
 
 When the command returns, report whether the worker finished or timed out, then suggest the next step:
-- On success: `/worker:logs <branch>` to see the output, or `/worker:tell <branch>` to give follow-up instructions.
-- On timeout: advise increasing `-t` or running `/worker:logs` to check the worker's current state.
+- On success: `/wt-worker:logs <branch>` to see the output, or `/wt-worker:tell <branch>` to give follow-up instructions.
+- On timeout: advise increasing `-t` or running `/wt-worker:logs` to check the worker's current state.

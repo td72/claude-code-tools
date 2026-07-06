@@ -1,6 +1,5 @@
 ---
 description: Run a branch's test suite in a clean CI-parity linux container (native bindings, browsers), since the worker's dev sandbox can't run e2e against host-mounted node_modules.
-disable-model-invocation: true
 ---
 
 # /wt-worker:verify

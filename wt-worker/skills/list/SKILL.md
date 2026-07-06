@@ -1,9 +1,8 @@
 ---
-description: List active worker worker sandboxes.
-disable-model-invocation: true
+description: List active worker sandboxes.
 ---
 
-# /worker:list
+# /wt-worker:list
 
 Run:
 
